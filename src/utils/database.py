@@ -473,6 +473,7 @@ class DatabaseManager(TradingLoggerMixin):
             for row in rows:
                 position_dict = dict(row)
                 position_dict['timestamp'] = datetime.fromisoformat(position_dict['timestamp'])
+                position_dict['live'] = bool(position_dict.get('live', 0))
                 positions.append(Position(**position_dict))
             return positions
 
@@ -492,6 +493,7 @@ class DatabaseManager(TradingLoggerMixin):
             for row in rows:
                 position_dict = dict(row)
                 position_dict['timestamp'] = datetime.fromisoformat(position_dict['timestamp'])
+                position_dict['live'] = bool(position_dict.get('live', 0))
                 positions.append(Position(**position_dict))
             return positions
 
@@ -527,6 +529,7 @@ class DatabaseManager(TradingLoggerMixin):
             if row:
                 position_dict = dict(row)
                 position_dict['timestamp'] = datetime.fromisoformat(position_dict['timestamp'])
+                position_dict['live'] = bool(position_dict.get('live', 0))
                 return Position(**position_dict)
             return None
 
@@ -551,6 +554,7 @@ class DatabaseManager(TradingLoggerMixin):
             if row:
                 position_dict = dict(row)
                 position_dict['timestamp'] = datetime.fromisoformat(position_dict['timestamp'])
+                position_dict['live'] = bool(position_dict.get('live', 0))
                 return Position(**position_dict)
             return None
 
@@ -943,20 +947,30 @@ class DatabaseManager(TradingLoggerMixin):
 
     async def update_position_to_live(self, position_id: int, entry_price: float):
         """
-        Updates the status and entry price of a position after it has been executed.
+        Mark a position as a real (live) fill after an on-chain / CLOB order.
 
         Args:
             position_id: The ID of the position to update.
             entry_price: The actual entry price from the exchange.
         """
+        await self.mark_position_filled(position_id, entry_price, live=True)
+
+    async def mark_position_filled(
+        self, position_id: int, entry_price: float, *, live: bool
+    ):
+        """
+        Update entry price after execution. Only live fills set live=1 so
+        paper simulations never enter the real sell / tracking order paths.
+        """
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
-                UPDATE positions 
-                SET live = 1, entry_price = ?
+                UPDATE positions
+                SET live = ?, entry_price = ?
                 WHERE id = ?
-            """, (entry_price, position_id))
+            """, (1 if live else 0, entry_price, position_id))
             await db.commit()
-        self.logger.info(f"Updated position {position_id} to live.")
+        mode = "live" if live else "paper"
+        self.logger.info(f"Updated position {position_id} as {mode} fill.")
 
     async def add_position(self, position: Position) -> Optional[int]:
         """

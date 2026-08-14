@@ -35,6 +35,15 @@ async def execute_position(
     logger = get_trading_logger("trade_execution")
     logger.info(f"🎯 Executing position for market: {position.market_id}")
     logger.info(f"🎛️ Live mode: {live_mode}")
+
+    # Defense in depth: never send real buys when settings say paper/dry-run,
+    # even if a caller passes live_mode=True by mistake.
+    if live_mode and not settings.trading.live_trading_enabled:
+        logger.error(
+            "Refusing live buy: settings.trading.live_trading_enabled is False "
+            "(DRY_RUN / paper mode). Forcing paper simulation."
+        )
+        live_mode = False
     
     if live_mode:
         logger.warning(f"💰 PLACING LIVE ORDER - Real money will be used for {position.market_id}")
@@ -118,7 +127,7 @@ async def execute_position(
             # For now, we will optimistically assume it fills at the entry price.
             fill_price = position.entry_price
 
-            await db_manager.update_position_to_live(position.id, fill_price)
+            await db_manager.mark_position_filled(position.id, fill_price, live=True)
             logger.info(f"✅ LIVE ORDER PLACED for {position.market_id}. Order ID: {order_response.get('order', {}).get('order_id')}")
             logger.info(f"💰 Real money used: ${position.quantity * fill_price:.2f}")
             return True
@@ -127,18 +136,27 @@ async def execute_position(
             logger.error(f"❌ FAILED to place LIVE order for {position.market_id}: {e}")
             return False
     else:
-        # Simulate the trade
-        await db_manager.update_position_to_live(position.id, position.entry_price)
+        # Simulate the trade — keep live=0 so tracking never places real sells.
+        await db_manager.mark_position_filled(position.id, position.entry_price, live=False)
         logger.info(f"📝 PAPER TRADE SIMULATED for {position.market_id} - No real money used")
         logger.info(f"📊 Would have used: ${position.quantity * position.entry_price:.2f}")
         return True
+
+
+def _effective_live_mode(live_mode: Optional[bool] = None) -> bool:
+    """Caller override ANDed with global settings (settings always win for False)."""
+    settings_live = bool(settings.trading.live_trading_enabled)
+    if live_mode is None:
+        return settings_live
+    return bool(live_mode) and settings_live
 
 
 async def place_sell_limit_order(
     position: Position,
     limit_price: float,
     db_manager: DatabaseManager,
-    polymarket_client: PolymarketClient
+    polymarket_client: PolymarketClient,
+    live_mode: Optional[bool] = None,
 ) -> bool:
     """
     Place a sell limit order to close an existing position.
@@ -148,14 +166,22 @@ async def place_sell_limit_order(
         limit_price: The limit price for the sell order (in dollars)
         db_manager: Database manager
         polymarket_client: Polymarket CLOB client
+        live_mode: Optional override; still gated by settings.trading.live_trading_enabled
     
     Returns:
-        True if order placed successfully, False otherwise
+        True if order placed successfully (or paper-simulated), False otherwise
     """
     logger = get_trading_logger("sell_limit_order")
+    effective_live = _effective_live_mode(live_mode)
+
+    if not effective_live:
+        logger.info(
+            f"📝 PAPER: skipping real SELL for {position.market_id} "
+            f"({position.quantity} {position.side} @ ${limit_price:.3f})"
+        )
+        return True
     
     try:
-        import uuid
         client_order_id = str(uuid.uuid4())
         
         # Convert price to cents for Polymarket CLOB
@@ -209,7 +235,8 @@ async def place_sell_limit_order(
 async def place_profit_taking_orders(
     db_manager: DatabaseManager,
     polymarket_client: PolymarketClient,
-    profit_threshold: float = 0.25  # 25% profit target
+    profit_threshold: float = 0.25,  # 25% profit target
+    live_mode: Optional[bool] = None,
 ) -> Dict[str, int]:
     """
     Place sell limit orders for positions that have reached profit targets.
@@ -218,6 +245,7 @@ async def place_profit_taking_orders(
         db_manager: Database manager
         polymarket_client: Polymarket CLOB client
         profit_threshold: Minimum profit percentage to trigger sell order
+        live_mode: Optional override; gated by settings
     
     Returns:
         Dictionary with results: {'orders_placed': int, 'positions_processed': int}
@@ -225,6 +253,11 @@ async def place_profit_taking_orders(
     logger = get_trading_logger("profit_taking")
     
     results = {'orders_placed': 0, 'positions_processed': 0}
+    effective_live = _effective_live_mode(live_mode)
+
+    if not effective_live:
+        logger.info("📝 PAPER mode: skipping profit-taking sell orders")
+        return results
     
     try:
         # Get all open live positions
@@ -273,7 +306,8 @@ async def place_profit_taking_orders(
                             position=position,
                             limit_price=sell_price,
                             db_manager=db_manager,
-                            polymarket_client=polymarket_client
+                            polymarket_client=polymarket_client,
+                            live_mode=True,
                         )
                         
                         if success:
@@ -297,7 +331,8 @@ async def place_profit_taking_orders(
 async def place_stop_loss_orders(
     db_manager: DatabaseManager,
     polymarket_client: PolymarketClient,
-    stop_loss_threshold: float = -0.10  # 10% stop loss
+    stop_loss_threshold: float = -0.10,  # 10% stop loss
+    live_mode: Optional[bool] = None,
 ) -> Dict[str, int]:
     """
     Place sell limit orders for positions that need stop-loss protection.
@@ -306,6 +341,7 @@ async def place_stop_loss_orders(
         db_manager: Database manager
         polymarket_client: Polymarket CLOB client
         stop_loss_threshold: Maximum loss percentage before triggering stop loss
+        live_mode: Optional override; gated by settings
     
     Returns:
         Dictionary with results: {'orders_placed': int, 'positions_processed': int}
@@ -313,6 +349,11 @@ async def place_stop_loss_orders(
     logger = get_trading_logger("stop_loss_orders")
     
     results = {'orders_placed': 0, 'positions_processed': 0}
+    effective_live = _effective_live_mode(live_mode)
+
+    if not effective_live:
+        logger.info("📝 PAPER mode: skipping stop-loss sell orders")
+        return results
     
     try:
         # Get all open live positions
@@ -360,7 +401,8 @@ async def place_stop_loss_orders(
                             position=position,
                             limit_price=stop_price,
                             db_manager=db_manager,
-                            polymarket_client=polymarket_client
+                            polymarket_client=polymarket_client,
+                            live_mode=True,
                         )
                         
                         if success:

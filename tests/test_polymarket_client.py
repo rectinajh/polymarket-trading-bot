@@ -167,12 +167,36 @@ class TestPlaceOrder(unittest.TestCase):
     """Ensures cents → dollars conversion, side resolution, and price-range
     sanity guards. Mocks the SDK so no actual signing/sending happens."""
 
+    def setUp(self):
+        # place_order refuses unless live trading is enabled
+        from src.config.settings import settings
+        self._prev_live = settings.trading.live_trading_enabled
+        self._prev_paper = settings.trading.paper_trading_mode
+        settings.trading.live_trading_enabled = True
+        settings.trading.paper_trading_mode = False
+
+    def tearDown(self):
+        from src.config.settings import settings
+        settings.trading.live_trading_enabled = self._prev_live
+        settings.trading.paper_trading_mode = self._prev_paper
+
     def _setup_client(self):
         c = PolymarketClient(private_key=DUMMY_PK)
         c.register_market("0xabc", "yes_token", "no_token")
         # Stub api creds so _ensure_api_creds is a no-op
         c._api_creds_set = True
         return c
+
+    def test_place_order_blocked_when_not_live(self):
+        from src.config.settings import settings
+        settings.trading.live_trading_enabled = False
+        c = self._setup_client()
+        with self.assertRaises(PolymarketAPIError) as ctx:
+            _run(c.place_order(
+                ticker="0xabc", client_order_id="cid-1", side="yes", action="buy",
+                count=10, type_="limit", yes_price=35,
+            ))
+        self.assertIn("live trading is disabled", str(ctx.exception).lower())
 
     def test_limit_yes_buy_converts_cents_to_dollars(self):
         c = self._setup_client()

@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.utils.logging_setup import TradingLoggerMixin
+from src.config.settings import validate_endpoint_url
 
 
 # --------------------------------------------------------------------------
@@ -189,15 +190,19 @@ class PolymarketClient(TradingLoggerMixin):
     ) -> None:
         self.private_key = (private_key or os.getenv("POLYMARKET_PRIVATE_KEY", "")).strip()
         self.funder = (funder or os.getenv("POLYMARKET_FUNDER", "") or "").strip() or None
-        self.host = (host or os.getenv("POLYMARKET_HOST", DEFAULT_HOST)).rstrip("/")
+        self.host = validate_endpoint_url(
+            (host or os.getenv("POLYMARKET_HOST", DEFAULT_HOST)).rstrip("/"),
+            what="POLYMARKET_HOST",
+        )
         self.chain_id = int(chain_id or os.getenv("POLYMARKET_CHAIN_ID", DEFAULT_CHAIN_ID))
         self.signature_type = (
             signature_type
             if signature_type is not None
             else int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0"))
         )
-        self.polygon_rpc_url = (
-            polygon_rpc_url or os.getenv("POLYGON_RPC_URL", "") or DEFAULT_RPC_URL
+        self.polygon_rpc_url = validate_endpoint_url(
+            (polygon_rpc_url or os.getenv("POLYGON_RPC_URL", "") or DEFAULT_RPC_URL),
+            what="POLYGON_RPC_URL",
         )
         self.max_retries = max_retries
         self.backoff_factor = backoff_factor
@@ -782,6 +787,16 @@ class PolymarketClient(TradingLoggerMixin):
         price hint was passed; otherwise we look up the current ask. For market
         SELL orders the SDK expects `amount` in shares.
         """
+        # Hard safety gate: refuse CLOB orders unless live trading is enabled.
+        # Callers in paper/DRY_RUN must not reach the SDK.
+        from src.config.settings import settings as _settings
+        if not _settings.trading.live_trading_enabled:
+            raise PolymarketAPIError(
+                "Refusing to place order: live trading is disabled "
+                "(DRY_RUN=true / LIVE_TRADING_ENABLED=false). "
+                "Enable live trading explicitly before sending real orders."
+            )
+
         try:
             from py_clob_client.clob_types import (
                 OrderArgs, MarketOrderArgs, OrderType, PartialCreateOrderOptions,

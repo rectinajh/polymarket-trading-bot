@@ -15,6 +15,12 @@ async def test_execute_position_places_live_order():
     """
     Test that the execution job correctly places a live order for a non-live position.
     """
+    from src.config.settings import settings
+    prev_live = settings.trading.live_trading_enabled
+    prev_paper = settings.trading.paper_trading_mode
+    settings.trading.live_trading_enabled = True
+    settings.trading.paper_trading_mode = False
+
     # Arrange: Setup a test database with a non-live position
     db_path = TEST_DB
     if os.path.exists(db_path):
@@ -39,6 +45,14 @@ async def test_execute_position_places_live_order():
     # Create a mock PolymarketClient
     from unittest.mock import Mock
     mock_polymarket_client = Mock()
+    mock_polymarket_client.get_market = AsyncMock(return_value={
+        "market": {
+            "yes_bid_dollars": 0.58,
+            "yes_ask_dollars": 0.60,
+            "no_bid_dollars": 0.38,
+            "no_ask_dollars": 0.40,
+        }
+    })
     mock_polymarket_client.place_order = AsyncMock(return_value={"order": {"order_id": "test-order-123"}})
     mock_polymarket_client.close = AsyncMock()
 
@@ -69,6 +83,8 @@ async def test_execute_position_places_live_order():
         assert updated_position.id == position_id
 
     finally:
+        settings.trading.live_trading_enabled = prev_live
+        settings.trading.paper_trading_mode = prev_paper
         # Teardown
         if os.path.exists(db_path):
             os.remove(db_path) 

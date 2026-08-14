@@ -7,7 +7,6 @@ Gemini, DeepSeek, and other frontier models for market analysis.
 import asyncio
 import json
 import os
-import pickle
 import re
 import time
 from dataclasses import dataclass, field
@@ -17,7 +16,12 @@ from typing import Any, Dict, List, Optional, Tuple
 from json_repair import repair_json
 from openai import AsyncOpenAI
 
-from src.clients.xai_client import TradingDecision, DailyUsageTracker
+from src.clients.xai_client import (
+    TradingDecision,
+    DailyUsageTracker,
+    load_daily_usage_tracker,
+    save_daily_usage_tracker,
+)
 from src.config.settings import settings
 from src.utils.logging_setup import TradingLoggerMixin, log_error_with_context
 
@@ -27,6 +31,7 @@ from src.utils.logging_setup import TradingLoggerMixin, log_error_with_context
 # ---------------------------------------------------------------------------
 
 MODEL_PRICING: Dict[str, Dict[str, float]] = {
+    # OpenRouter slugs
     "anthropic/claude-sonnet-4": {
         "input_per_1k": 0.003,
         "output_per_1k": 0.015,
@@ -51,15 +56,38 @@ MODEL_PRICING: Dict[str, Dict[str, float]] = {
         "input_per_1k": 0.0008,
         "output_per_1k": 0.002,
     },
+    # Kimi / Moonshot (approx; cost tracker is advisory)
+    "moonshot-v1-8k": {"input_per_1k": 0.012, "output_per_1k": 0.012},
+    "moonshot-v1-32k": {"input_per_1k": 0.024, "output_per_1k": 0.024},
+    "moonshot-v1-128k": {"input_per_1k": 0.06, "output_per_1k": 0.06},
+    "kimi-k2-turbo-preview": {"input_per_1k": 0.015, "output_per_1k": 0.015},
+    "kimi-k2-0711-preview": {"input_per_1k": 0.015, "output_per_1k": 0.015},
+    "kimi-k3": {"input_per_1k": 0.02, "output_per_1k": 0.02},
 }
 
 # Ordered fallback chain -- if the requested model fails, try the next one.
-DEFAULT_FALLBACK_ORDER: List[str] = [
+DEFAULT_FALLBACK_ORDER_OPENROUTER: List[str] = [
     "anthropic/claude-sonnet-4",
     "openai/gpt-4.1",
     "google/gemini-2.5-pro-preview",
     "deepseek/deepseek-r1",
 ]
+
+DEFAULT_FALLBACK_ORDER_KIMI: List[str] = [
+    "moonshot-v1-128k",
+    "moonshot-v1-32k",
+    "moonshot-v1-8k",
+    "kimi-k2-turbo-preview",
+    "kimi-k3",
+]
+
+DEFAULT_FALLBACK_ORDER: List[str] = DEFAULT_FALLBACK_ORDER_OPENROUTER
+
+
+def _active_fallback_order() -> List[str]:
+    if getattr(settings.api, "llm_provider", "openrouter") == "kimi":
+        return DEFAULT_FALLBACK_ORDER_KIMI
+    return DEFAULT_FALLBACK_ORDER_OPENROUTER
 
 
 # ---------------------------------------------------------------------------
@@ -106,17 +134,23 @@ class OpenRouterClient(TradingLoggerMixin):
     def __init__(
         self,
         api_key: Optional[str] = None,
-        default_model: str = "anthropic/claude-sonnet-4",
+        default_model: Optional[str] = None,
         db_manager: Any = None,
     ):
         self.api_key = api_key or settings.api.openrouter_api_key
         self.base_url = settings.api.openrouter_base_url
-        self.default_model = default_model
+        self.default_model = default_model or settings.trading.primary_model
         self.db_manager = db_manager
 
-        # OpenAI-compatible async client pointed at OpenRouter
+        if not self.api_key:
+            self.logger.warning(
+                "LLM API key not set — completions will fail. "
+                "Set MOONSHOT_API_KEY (Kimi) or OPENROUTER_API_KEY."
+            )
+
+        # OpenAI-compatible async client (OpenRouter or Moonshot/Kimi)
         self.client = AsyncOpenAI(
-            api_key=self.api_key,
+            api_key=self.api_key or "missing",
             base_url=self.base_url,
             timeout=120.0,
             max_retries=0,  # We handle retries ourselves
@@ -135,13 +169,15 @@ class OpenRouterClient(TradingLoggerMixin):
         self.total_cost: float = 0.0
         self.request_count: int = 0
 
-        # Daily usage tracker (same pattern as XAIClient)
-        self.usage_file = "logs/daily_openrouter_usage.pkl"
+        # Daily usage tracker (JSON on disk — never pickle)
+        self.usage_file = "logs/daily_openrouter_usage.json"
         self.daily_tracker: DailyUsageTracker = self._load_daily_tracker()
 
         self.logger.info(
-            "OpenRouter client initialized",
+            "LLM client initialized",
+            provider=getattr(settings.api, "llm_provider", "openrouter"),
             default_model=self.default_model,
+            base_url=self.base_url,
             available_models=list(MODEL_PRICING.keys()),
             daily_limit=self.daily_tracker.daily_limit,
             today_cost=self.daily_tracker.total_cost,
@@ -154,40 +190,14 @@ class OpenRouterClient(TradingLoggerMixin):
 
     def _load_daily_tracker(self) -> DailyUsageTracker:
         """Load or create a daily usage tracker from disk."""
-        today = datetime.now().strftime("%Y-%m-%d")
         daily_limit = getattr(settings.trading, "daily_ai_cost_limit", 50.0)
-        os.makedirs("logs", exist_ok=True)
-
-        try:
-            if os.path.exists(self.usage_file):
-                with open(self.usage_file, "rb") as fh:
-                    tracker: DailyUsageTracker = pickle.load(fh)
-                if tracker.date != today:
-                    tracker = DailyUsageTracker(
-                        date=today,
-                        daily_limit=daily_limit,
-                    )
-                else:
-                    # Always sync daily_limit from settings (user may have changed it)
-                    if tracker.daily_limit != daily_limit:
-                        tracker.daily_limit = daily_limit
-                        # Un-exhaust if new limit is higher than current cost
-                        if tracker.is_exhausted and tracker.total_cost < daily_limit:
-                            tracker.is_exhausted = False
-                return tracker
-        except Exception as exc:
-            self.logger.warning(f"Failed to load daily tracker: {exc}")
-
-        return DailyUsageTracker(date=today, daily_limit=daily_limit)
+        return load_daily_usage_tracker(
+            self.usage_file, daily_limit=daily_limit, logger=self.logger
+        )
 
     def _save_daily_tracker(self) -> None:
         """Persist the daily tracker to disk."""
-        try:
-            os.makedirs("logs", exist_ok=True)
-            with open(self.usage_file, "wb") as fh:
-                pickle.dump(self.daily_tracker, fh)
-        except Exception as exc:
-            self.logger.error(f"Failed to save daily tracker: {exc}")
+        save_daily_usage_tracker(self.usage_file, self.daily_tracker, logger=self.logger)
 
     def _update_daily_cost(self, cost: float) -> None:
         """Add *cost* to the daily tracker and check the limit."""
@@ -313,7 +323,7 @@ class OpenRouterClient(TradingLoggerMixin):
         """
         first = requested_model or self.default_model
         chain = [first]
-        for model in DEFAULT_FALLBACK_ORDER:
+        for model in _active_fallback_order():
             if model not in chain:
                 chain.append(model)
         return chain

@@ -4,8 +4,8 @@ Enhanced evaluation system with cost monitoring and trading performance analysis
 
 import asyncio
 import aiosqlite
+import json
 import os
-import pickle
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
@@ -16,27 +16,32 @@ from src.utils.logging_setup import get_trading_logger
 
 def _read_xai_tracker_from_pickle() -> Optional[dict]:
     """
-    Read the in-memory DailyUsageTracker that xai_client persists to disk.
+    Read the DailyUsageTracker persisted as JSON by xai_client.
 
     Returns a plain dict with keys: date, total_cost, request_count,
     daily_limit, is_exhausted — or None if the file is missing/unreadable.
+
+    Function name kept for call-site compatibility.
     """
-    usage_file = "logs/daily_ai_usage.pkl"
-    try:
-        if os.path.exists(usage_file):
-            with open(usage_file, "rb") as f:
-                tracker = pickle.load(f)
+    for usage_file in ("logs/daily_ai_usage.json", "logs/daily_openrouter_usage.json"):
+        try:
+            if not os.path.exists(usage_file):
+                continue
+            with open(usage_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                continue
             today = datetime.now().strftime("%Y-%m-%d")
-            if getattr(tracker, "date", None) == today:
+            if data.get("date") == today:
                 return {
-                    "date": tracker.date,
-                    "total_cost": getattr(tracker, "total_cost", 0.0),
-                    "request_count": getattr(tracker, "request_count", 0),
-                    "daily_limit": getattr(tracker, "daily_limit", 50.0),
-                    "is_exhausted": getattr(tracker, "is_exhausted", False),
+                    "date": data.get("date"),
+                    "total_cost": float(data.get("total_cost", 0.0) or 0.0),
+                    "request_count": int(data.get("request_count", 0) or 0),
+                    "daily_limit": float(data.get("daily_limit", 50.0) or 50.0),
+                    "is_exhausted": bool(data.get("is_exhausted", False)),
                 }
-    except Exception:
-        pass
+        except Exception:
+            continue
     return None
 
 

@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
 from src.utils.logging_setup import TradingLoggerMixin
+from src.config.settings import validate_endpoint_url
 
 
 DEFAULT_GAMMA_HOST = "https://gamma-api.polymarket.com"
@@ -40,6 +41,9 @@ DEFAULT_LIMIT_PER_PAGE = 200
 # Maximum pages to walk in one discovery call. 40 × 200 = 8 000 markets,
 # enough for the full active universe (~3 000 today) with margin.
 MAX_PAGES = 40
+# Gamma `/events?offset=` rejects values above this with HTTP 422
+# ("offset too large, use /events/keyset"). Stop offset pagination here.
+MAX_EVENTS_OFFSET = 2000
 
 # Canonical Polymarket category slugs → tag IDs.
 # /tags endpoint only paginates a subset and does NOT include some canonical
@@ -93,8 +97,14 @@ class GammaClient(TradingLoggerMixin):
         max_retries: int = 3,
         backoff_factor: float = 0.5,
     ) -> None:
-        self.host = (host or os.getenv("POLYMARKET_GAMMA_HOST", DEFAULT_GAMMA_HOST)).rstrip("/")
-        self.clob_host = (clob_host or os.getenv("POLYMARKET_HOST", DEFAULT_CLOB_HOST)).rstrip("/")
+        self.host = validate_endpoint_url(
+            (host or os.getenv("POLYMARKET_GAMMA_HOST", DEFAULT_GAMMA_HOST)).rstrip("/"),
+            what="POLYMARKET_GAMMA_HOST",
+        )
+        self.clob_host = validate_endpoint_url(
+            (clob_host or os.getenv("POLYMARKET_HOST", DEFAULT_CLOB_HOST)).rstrip("/"),
+            what="POLYMARKET_HOST",
+        )
         self.max_retries = max_retries
         self.backoff_factor = backoff_factor
 
@@ -245,6 +255,14 @@ class GammaClient(TradingLoggerMixin):
         exclude_tag_ids_set = set(exclude_tag_ids or [])
 
         while page < MAX_PAGES and len(out) < max_results:
+            if offset > MAX_EVENTS_OFFSET:
+                self.logger.info(
+                    "Gamma /events offset cap reached; stopping pagination",
+                    offset=offset,
+                    max_offset=MAX_EVENTS_OFFSET,
+                    markets=len(out),
+                )
+                break
             params: Dict[str, Any] = {
                 "active":    str(active).lower(),
                 "closed":    str(closed).lower(),
@@ -254,7 +272,17 @@ class GammaClient(TradingLoggerMixin):
                 "order":     order,
                 "ascending": str(ascending).lower(),
             }
-            data = await self._request("GET", f"{self.host}/events", params=params)
+            try:
+                data = await self._request("GET", f"{self.host}/events", params=params)
+            except GammaAPIError as exc:
+                if "offset too large" in str(exc).lower():
+                    self.logger.info(
+                        "Gamma pagination ended (offset limit)",
+                        offset=offset,
+                        markets=len(out),
+                    )
+                    break
+                raise
             if not isinstance(data, list) or not data:
                 break
 
@@ -435,6 +463,8 @@ class GammaClient(TradingLoggerMixin):
         tag_ids_set = set(tag_ids or [])
 
         while page < MAX_PAGES and len(out) < max_results:
+            if offset > MAX_EVENTS_OFFSET:
+                break
             params: Dict[str, Any] = {
                 "active":    str(active).lower(),
                 "closed":    str(closed).lower(),
@@ -444,7 +474,12 @@ class GammaClient(TradingLoggerMixin):
                 "order":     order,
                 "ascending": str(ascending).lower(),
             }
-            data = await self._request("GET", f"{self.host}/events", params=params)
+            try:
+                data = await self._request("GET", f"{self.host}/events", params=params)
+            except GammaAPIError as exc:
+                if "offset too large" in str(exc).lower():
+                    break
+                raise
             if not isinstance(data, list) or not data:
                 break
 

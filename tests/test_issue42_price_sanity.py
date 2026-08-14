@@ -120,6 +120,7 @@ def _mock_clients(market_prices: dict):
     """Return (db_manager_mock, polymarket_client_mock) wired with the given market data."""
     db_mock = AsyncMock()
     db_mock.update_position_to_live = AsyncMock(return_value=None)
+    db_mock.mark_position_filled = AsyncMock(return_value=None)
 
     polymarket_mock = Mock()
     polymarket_mock.get_market = AsyncMock(return_value={"market": market_prices})
@@ -127,7 +128,19 @@ def _mock_clients(market_prices: dict):
     return db_mock, polymarket_mock
 
 
-async def test_execute_skips_collection_ticker_yes_side():
+@pytest.fixture
+def enable_live_trading():
+    from src.config.settings import settings
+    prev_live = settings.trading.live_trading_enabled
+    prev_paper = settings.trading.paper_trading_mode
+    settings.trading.live_trading_enabled = True
+    settings.trading.paper_trading_mode = False
+    yield
+    settings.trading.live_trading_enabled = prev_live
+    settings.trading.paper_trading_mode = prev_paper
+
+
+async def test_execute_skips_collection_ticker_yes_side(enable_live_trading):
     """execute_position returns False and does NOT place an order for a collection ticker."""
     from src.jobs.execute import execute_position
 
@@ -151,7 +164,7 @@ async def test_execute_skips_collection_ticker_yes_side():
     polymarket_mock.place_order.assert_not_called()
 
 
-async def test_execute_skips_collection_ticker_no_side():
+async def test_execute_skips_collection_ticker_no_side(enable_live_trading):
     """execute_position returns False for NO-side collection ticker too."""
     from src.jobs.execute import execute_position
 
@@ -175,7 +188,7 @@ async def test_execute_skips_collection_ticker_no_side():
     polymarket_mock.place_order.assert_not_called()
 
 
-async def test_execute_skips_zero_price():
+async def test_execute_skips_zero_price(enable_live_trading):
     """execute_position returns False when ask converts to 0¢."""
     from src.jobs.execute import execute_position
 
@@ -199,7 +212,7 @@ async def test_execute_skips_zero_price():
     polymarket_mock.place_order.assert_not_called()
 
 
-async def test_execute_skips_100_cent_price():
+async def test_execute_skips_100_cent_price(enable_live_trading):
     """execute_position returns False when ask converts to 100¢ for one side."""
     from src.jobs.execute import execute_position
 
@@ -225,7 +238,7 @@ async def test_execute_skips_100_cent_price():
     polymarket_mock.place_order.assert_not_called()
 
 
-async def test_execute_allows_normal_market():
+async def test_execute_allows_normal_market(enable_live_trading):
     """execute_position proceeds normally for a healthy 50/50 market."""
     from src.jobs.execute import execute_position
 

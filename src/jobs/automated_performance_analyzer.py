@@ -244,6 +244,9 @@ class AutomatedPerformanceAnalyzer:
             total_trades = trade_stats[0] if trade_stats else 0
             manual_trades = manual_stats[0] if manual_stats else 0
             auto_trades = auto_stats[0] if auto_stats else 0
+
+            def _n(value, default=0.0):
+                return default if value is None else value
             
             # Store trade date range for context
             self.trade_date_range = {
@@ -252,21 +255,21 @@ class AutomatedPerformanceAnalyzer:
             }
             
             return PerformanceMetrics(
-                total_trades=total_trades,
-                manual_trades=manual_trades,
-                automated_trades=auto_trades,
+                total_trades=total_trades or 0,
+                manual_trades=manual_trades or 0,
+                automated_trades=auto_trades or 0,
                 manual_win_rate=(manual_stats[1] / manual_trades) if manual_trades > 0 else 0,
                 automated_win_rate=(auto_stats[1] / auto_trades) if auto_trades > 0 else 0,
                 overall_win_rate=(trade_stats[1] / total_trades) if total_trades > 0 else 0,
-                total_pnl=trade_stats[3] if trade_stats else 0,
-                manual_pnl=manual_stats[2] if manual_stats else 0,
-                automated_pnl=auto_stats[2] if auto_stats else 0,
+                total_pnl=_n(trade_stats[3] if trade_stats else 0),
+                manual_pnl=_n(manual_stats[2] if manual_stats else 0),
+                automated_pnl=_n(auto_stats[2] if auto_stats else 0),
                 unrealized_pnl=0,  # Will be calculated from current positions
                 capital_utilization=((portfolio_data['total_portfolio_value'] - portfolio_data['available_cash']) / portfolio_data['total_portfolio_value']) * 100 if portfolio_data['total_portfolio_value'] > 0 else 0,
-                available_cash=portfolio_data['available_cash'],
-                active_positions=portfolio_data['active_positions'],
-                avg_position_size=position_stats[1] if position_stats else 0,
-                largest_position_pct=(position_stats[2] / portfolio_data['total_portfolio_value']) * 100 if portfolio_data['total_portfolio_value'] > 0 and position_stats[2] else 0
+                available_cash=_n(portfolio_data.get('available_cash')),
+                active_positions=_n(portfolio_data.get('active_positions'), 0),
+                avg_position_size=_n(position_stats[1] if position_stats else 0),
+                largest_position_pct=(position_stats[2] / portfolio_data['total_portfolio_value']) * 100 if portfolio_data['total_portfolio_value'] > 0 and position_stats and position_stats[2] else 0
             )
     
     async def _run_risk_checks(self, portfolio_data: Dict[str, Any], metrics: PerformanceMetrics) -> List[RiskCheck]:

@@ -392,9 +392,12 @@ Beast Mode Features:
     # Handle --reset-limits
     if args.reset_limits:
         import glob
-        pkl_files = glob.glob("logs/daily_*usage*.pkl")
-        if pkl_files:
-            for f in pkl_files:
+        usage_files = (
+            glob.glob("logs/daily_*usage*.json")
+            + glob.glob("logs/daily_*usage*.pkl")
+        )
+        if usage_files:
+            for f in usage_files:
                 os.remove(f)
                 print(f"✅ Deleted {f}")
             print("🔄 Daily AI limits reset. Restart the bot to continue trading.")

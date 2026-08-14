@@ -4,12 +4,168 @@ Manages trading parameters, API configurations, and risk management settings.
 """
 
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
+
+
+def _env_flag(name: str, default: str = "false") -> bool:
+    """Parse a boolean environment variable."""
+    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+def resolve_live_trading_enabled() -> bool:
+    """Resolve whether real orders may be sent.
+
+    DRY_RUN takes precedence when set (including empty-check after strip):
+      DRY_RUN=true  → paper (live disabled)
+      DRY_RUN=false → live enabled
+    Otherwise fall back to LIVE_TRADING_ENABLED (legacy).
+    Default is paper / dry-run for safety.
+    """
+    dry_run_raw = os.getenv("DRY_RUN")
+    if dry_run_raw is not None and dry_run_raw.strip() != "":
+        # DRY_RUN wins over LIVE_TRADING_ENABLED
+        return not _env_flag("DRY_RUN", "true")
+    return _env_flag("LIVE_TRADING_ENABLED", "false")
+
+
+# Official / expected hosts only. Override with POLYMARKET_ALLOW_CUSTOM_HOSTS=true
+# only for deliberate private relays / local forks.
+_ALLOWED_HOST_SUFFIXES: Sequence[str] = (
+    "clob.polymarket.com",
+    "gamma-api.polymarket.com",
+    "data-api.polymarket.com",
+    "polygon-rpc.com",
+    # Common Polygon RPC providers
+    "tenderly.co",
+    "alchemy.com",
+    "infura.io",
+    "quiknode.pro",
+    "quicknode.com",
+    "ankr.com",
+    "blastapi.io",
+    "llamarpc.com",
+    "publicnode.com",
+    "chainstack.com",
+    # LLM gateways
+    "openrouter.ai",
+    "api.openai.com",
+    "moonshot.cn",
+    "moonshot.ai",
+    "platform.moonshot.cn",
+)
+
+
+def _first_nonempty_env(*names: str) -> str:
+    for name in names:
+        val = os.getenv(name)
+        if val is not None and str(val).strip() != "":
+            return str(val).strip()
+    return ""
+
+
+def resolve_llm_provider() -> str:
+    """Return 'kimi' | 'openrouter' based on env (explicit LLM_PROVIDER wins)."""
+    explicit = os.getenv("LLM_PROVIDER", "").strip().lower()
+    if explicit in ("kimi", "moonshot", "moonshot-cn"):
+        return "kimi"
+    if explicit in ("openrouter", "or"):
+        return "openrouter"
+    # Auto-detect: Moonshot/Kimi key present and no real OpenRouter key
+    has_kimi = bool(_first_nonempty_env("MOONSHOT_API_KEY", "KIMI_API_KEY", "LLM_API_KEY"))
+    or_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+    or_placeholder = or_key in ("", "your_openrouter_api_key_here")
+    if has_kimi and or_placeholder:
+        return "kimi"
+    return "openrouter"
+
+
+def resolve_llm_api_key() -> str:
+    provider = resolve_llm_provider()
+    if provider == "kimi":
+        return _first_nonempty_env(
+            "LLM_API_KEY", "MOONSHOT_API_KEY", "KIMI_API_KEY", "OPENROUTER_API_KEY"
+        )
+    return _first_nonempty_env(
+        "LLM_API_KEY", "OPENROUTER_API_KEY", "MOONSHOT_API_KEY", "KIMI_API_KEY"
+    )
+
+
+def resolve_llm_base_url() -> str:
+    """OpenAI-compatible chat completions base URL."""
+    override = os.getenv("LLM_BASE_URL", "").strip() or os.getenv("OPENROUTER_BASE_URL", "").strip()
+    if override:
+        return validate_endpoint_url(override, what="LLM_BASE_URL")
+    if resolve_llm_provider() == "kimi":
+        # Domestic Moonshot endpoint; set LLM_BASE_URL=https://api.moonshot.ai/v1 for intl.
+        return validate_endpoint_url("https://api.moonshot.cn/v1", what="LLM_BASE_URL")
+    return validate_endpoint_url("https://openrouter.ai/api/v1", what="LLM_BASE_URL")
+
+
+def _default_primary_model() -> str:
+    env = os.getenv("PRIMARY_MODEL", "").strip()
+    if env:
+        return env
+    return "moonshot-v1-128k" if resolve_llm_provider() == "kimi" else "anthropic/claude-sonnet-4.5"
+
+
+def _default_fallback_model() -> str:
+    env = os.getenv("FALLBACK_MODEL", "").strip()
+    if env:
+        return env
+    return "moonshot-v1-32k" if resolve_llm_provider() == "kimi" else "deepseek/deepseek-v3.2"
+
+
+def _default_sentiment_model() -> str:
+    env = os.getenv("SENTIMENT_MODEL", "").strip()
+    if env:
+        return env
+    return "moonshot-v1-8k" if resolve_llm_provider() == "kimi" else "google/gemini-3.1-flash-lite-preview"
+
+
+def validate_endpoint_url(url: str, *, what: str = "endpoint") -> str:
+    """Reject non-HTTPS or non-allowlisted hosts unless custom hosts are opted in."""
+    raw = (url or "").strip()
+    if not raw:
+        raise ValueError(f"{what} URL is empty")
+
+    parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+    if parsed.scheme not in ("https", "http"):
+        raise ValueError(f"{what} URL must be http(s): {raw!r}")
+
+    host = (parsed.hostname or "").lower()
+    if not host:
+        raise ValueError(f"{what} URL missing host: {raw!r}")
+
+    # Local RPC / dashboards
+    if host in ("localhost", "127.0.0.1", "::1"):
+        return raw.rstrip("/")
+
+    if _env_flag("POLYMARKET_ALLOW_CUSTOM_HOSTS", "false"):
+        return raw.rstrip("/")
+
+    allowed = host in _ALLOWED_HOST_SUFFIXES or any(
+        host.endswith("." + suffix) for suffix in _ALLOWED_HOST_SUFFIXES
+    )
+    if not allowed:
+        raise ValueError(
+            f"{what} host {host!r} is not allowlisted. "
+            f"Use an official Polymarket/RPC endpoint, or set "
+            f"POLYMARKET_ALLOW_CUSTOM_HOSTS=true only if you trust the host."
+        )
+    return raw.rstrip("/")
+
+
+def _validated_env_url(env_name: str, default: str, what: str) -> str:
+    raw = os.getenv(env_name, default)
+    if raw is None or str(raw).strip() == "":
+        raw = default
+    return validate_endpoint_url(raw, what=what)
 
 
 @dataclass
@@ -18,19 +174,31 @@ class APIConfig:
     # --- Polymarket (active exchange) ---
     polymarket_private_key: str = field(default_factory=lambda: os.getenv("POLYMARKET_PRIVATE_KEY", ""))
     polymarket_funder: str = field(default_factory=lambda: os.getenv("POLYMARKET_FUNDER", ""))
-    polymarket_host: str = field(default_factory=lambda: os.getenv("POLYMARKET_HOST", "https://clob.polymarket.com"))
+    polymarket_host: str = field(
+        default_factory=lambda: _validated_env_url(
+            "POLYMARKET_HOST", "https://clob.polymarket.com", "POLYMARKET_HOST"
+        )
+    )
     polymarket_chain_id: int = field(default_factory=lambda: int(os.getenv("POLYMARKET_CHAIN_ID", "137")))
     polymarket_signature_type: int = field(default_factory=lambda: int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0")))
-    polymarket_gamma_host: str = field(default_factory=lambda: os.getenv("POLYMARKET_GAMMA_HOST", "https://gamma-api.polymarket.com"))
-    polygon_rpc_url: str = field(default_factory=lambda: os.getenv("POLYGON_RPC_URL", "https://polygon-rpc.com"))
+    polymarket_gamma_host: str = field(
+        default_factory=lambda: _validated_env_url(
+            "POLYMARKET_GAMMA_HOST", "https://gamma-api.polymarket.com", "POLYMARKET_GAMMA_HOST"
+        )
+    )
+    polygon_rpc_url: str = field(
+        default_factory=lambda: _validated_env_url(
+            "POLYGON_RPC_URL", "https://polygon-rpc.com", "POLYGON_RPC_URL"
+        )
+    )
 
-    # --- LLM ---
+    # --- LLM (OpenRouter or Kimi/Moonshot — both OpenAI-compatible) ---
     openai_api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
-    openrouter_api_key: str = field(default_factory=lambda: os.getenv("OPENROUTER_API_KEY", ""))
+    # Kept name openrouter_* for compatibility; values resolve from LLM_*/MOONSHOT_*/OPENROUTER_*
+    openrouter_api_key: str = field(default_factory=resolve_llm_api_key)
     openai_base_url: str = "https://api.openai.com/v1"
-    openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    # All models route through OpenRouter — there is no direct xAI/OpenAI key
-    # path in the live trading code today.
+    openrouter_base_url: str = field(default_factory=resolve_llm_base_url)
+    llm_provider: str = field(default_factory=resolve_llm_provider)
 
 
 @dataclass
@@ -63,7 +231,7 @@ class SentimentConfig:
         "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml",
         "https://feeds.bbci.co.uk/news/business/rss.xml",
     ])
-    sentiment_model: str = "google/gemini-3.1-flash-lite-preview"  # Fast/cheap for sentiment ($0.25/M)
+    sentiment_model: str = field(default_factory=_default_sentiment_model)
     cache_ttl_minutes: int = 30
     max_articles_per_source: int = 10
     relevance_threshold: float = 0.3
@@ -102,9 +270,9 @@ class TradingConfig:
     
     scan_interval_seconds: int = 60      # SANE: 60-second scan interval (was 30)
     
-    # AI model configuration
-    primary_model: str = "anthropic/claude-sonnet-4.5"  # Primary model via OpenRouter
-    fallback_model: str = "deepseek/deepseek-v3.2"  # Fallback model via OpenRouter
+    # AI model configuration (override via PRIMARY_MODEL / FALLBACK_MODEL)
+    primary_model: str = field(default_factory=_default_primary_model)
+    fallback_model: str = field(default_factory=_default_fallback_model)
     ai_temperature: float = 0  # Lower temperature for more consistent JSON output
     ai_max_tokens: int = 8000    # Reasonable limit for reasoning models (grok-4 works better with 8000)
     
@@ -117,9 +285,9 @@ class TradingConfig:
     kelly_fraction: float = 0.25            # SANE: Quarter-Kelly (was 0.75 beast mode — gambling)
     max_single_position: float = 0.03       # SANE: 3% max position cap (was 0.05 beast mode)
     
-    # Live trading mode control
-    live_trading_enabled: bool = field(default_factory=lambda: os.getenv("LIVE_TRADING_ENABLED", "false").lower() == "true")
-    paper_trading_mode: bool = field(default_factory=lambda: os.getenv("LIVE_TRADING_ENABLED", "false").lower() != "true")
+    # Live trading mode control — DRY_RUN wins over LIVE_TRADING_ENABLED (see resolve_live_trading_enabled)
+    live_trading_enabled: bool = field(default_factory=resolve_live_trading_enabled)
+    paper_trading_mode: bool = field(default_factory=lambda: not resolve_live_trading_enabled())
     
     # Trading frequency - MORE FREQUENT
     market_scan_interval: int = 30          # DECREASED: Scan every 30 seconds (was 60)

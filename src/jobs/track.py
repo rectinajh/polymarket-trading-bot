@@ -132,7 +132,11 @@ async def run_tracking(db_manager: Optional[DatabaseManager] = None):
         db_manager: Optional DatabaseManager instance for testing.
     """
     logger = get_trading_logger("position_tracking")
-    logger.info("Starting enhanced position tracking job with sell limit orders.")
+    live_mode = bool(settings.trading.live_trading_enabled)
+    logger.info(
+        "Starting enhanced position tracking job with sell limit orders. "
+        f"live_mode={live_mode}"
+    )
 
     if db_manager is None:
         db_manager = DatabaseManager()
@@ -141,31 +145,42 @@ async def run_tracking(db_manager: Optional[DatabaseManager] = None):
     polymarket_client = PolymarketClient()
 
     try:
-        # Step 1: Place sell limit orders for profit-taking and stop-loss
-        from src.jobs.execute import place_profit_taking_orders, place_stop_loss_orders
-        
-        logger.info("🎯 Checking for profit-taking opportunities...")
-        profit_results = await place_profit_taking_orders(
-            db_manager=db_manager,
-            polymarket_client=polymarket_client,
-            profit_threshold=0.20  # 20% profit target
-        )
-        
-        logger.info("🛡️ Checking for stop-loss protection...")
-        stop_loss_results = await place_stop_loss_orders(
-            db_manager=db_manager,
-            polymarket_client=polymarket_client,
-            stop_loss_threshold=-0.15  # 15% stop loss
-        )
-        
-        total_sell_orders = profit_results['orders_placed'] + stop_loss_results['orders_placed']
-        if total_sell_orders > 0:
-            logger.info(f"📈 SELL LIMIT ORDERS SUMMARY: {total_sell_orders} orders placed")
-            logger.info(f"   Profit-taking: {profit_results['orders_placed']} orders")
-            logger.info(f"   Stop-loss: {stop_loss_results['orders_placed']} orders")
-        
-        # Step 2: Continue with existing position tracking (market resolution, etc.)
-        open_positions = await db_manager.get_open_live_positions()
+        total_sell_orders = 0
+
+        # Step 1: Real profit/stop sells only in live mode
+        if live_mode:
+            from src.jobs.execute import place_profit_taking_orders, place_stop_loss_orders
+
+            logger.info("🎯 Checking for profit-taking opportunities...")
+            profit_results = await place_profit_taking_orders(
+                db_manager=db_manager,
+                polymarket_client=polymarket_client,
+                profit_threshold=0.20,  # 20% profit target
+                live_mode=True,
+            )
+
+            logger.info("🛡️ Checking for stop-loss protection...")
+            stop_loss_results = await place_stop_loss_orders(
+                db_manager=db_manager,
+                polymarket_client=polymarket_client,
+                stop_loss_threshold=-0.15,  # 15% stop loss
+                live_mode=True,
+            )
+
+            total_sell_orders = profit_results['orders_placed'] + stop_loss_results['orders_placed']
+            if total_sell_orders > 0:
+                logger.info(f"📈 SELL LIMIT ORDERS SUMMARY: {total_sell_orders} orders placed")
+                logger.info(f"   Profit-taking: {profit_results['orders_placed']} orders")
+                logger.info(f"   Stop-loss: {stop_loss_results['orders_placed']} orders")
+        else:
+            logger.info("📝 PAPER mode: skipping profit-taking / stop-loss CLOB sell orders")
+
+        # Step 2: Track positions. Live mode only watches live fills; paper
+        # watches all open rows (live=0 paper fills) so exits stay simulated.
+        if live_mode:
+            open_positions = await db_manager.get_open_live_positions()
+        else:
+            open_positions = await db_manager.get_open_positions()
 
         if not open_positions:
             logger.info("No open positions to track.")
@@ -234,11 +249,15 @@ async def run_tracking(db_manager: Optional[DatabaseManager] = None):
                             continue
 
                         from src.jobs.execute import place_sell_limit_order
+                        # live_mode=False → paper simulate (no CLOB call). Even if
+                        # DB still has stale live=1 rows from older paper runs,
+                        # settings gate prevents real sells.
                         sell_ok = await place_sell_limit_order(
                             position=position,
                             limit_price=exit_price,
                             db_manager=db_manager,
                             polymarket_client=polymarket_client,
+                            live_mode=live_mode,
                         )
                         if not sell_ok:
                             logger.error(
@@ -247,7 +266,8 @@ async def run_tracking(db_manager: Optional[DatabaseManager] = None):
                             )
                             exit_sell_failures += 1
                             continue
-                        exit_sell_orders_placed += 1
+                        if live_mode:
+                            exit_sell_orders_placed += 1
 
                     # Calculate PnL
                     pnl = (exit_price - position.entry_price) * position.quantity

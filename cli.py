@@ -552,13 +552,33 @@ def cmd_health(args: argparse.Namespace) -> None:
 
     for var, placeholder in (
         ("POLYMARKET_PRIVATE_KEY", "0xyour_polygon_private_key_here"),
-        ("OPENROUTER_API_KEY", "your_openrouter_api_key_here"),
     ):
         val = os.getenv(var, "")
         if val and val not in ("", placeholder):
             ok(f"{var} is set")
         else:
             fail(f"{var} is missing or placeholder")
+
+    # LLM key: Moonshot/Kimi or OpenRouter
+    from src.config.settings import resolve_llm_api_key, resolve_llm_provider, settings as _settings
+    llm_key = resolve_llm_api_key()
+    llm_placeholders = (
+        "",
+        "your_moonshot_api_key_here",
+        "your_openrouter_api_key_here",
+        "your_kimi_api_key_here",
+    )
+    if llm_key and llm_key not in llm_placeholders:
+        ok(
+            f"LLM API key is set",
+            f"provider={resolve_llm_provider()} base={_settings.api.openrouter_base_url} "
+            f"model={_settings.trading.primary_model}",
+        )
+    else:
+        fail(
+            "LLM API key missing",
+            "set MOONSHOT_API_KEY (Kimi) or OPENROUTER_API_KEY in .env",
+        )
 
     # 3. Polygon RPC + USDC.e balance
     async def _check_balance() -> None:

@@ -13,8 +13,8 @@ This file holds:
 """
 
 import asyncio
+import json
 import os
-import pickle
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -48,6 +48,87 @@ class DailyUsageTracker:
     is_exhausted: bool = False
     last_exhausted_time: Optional[datetime] = None
 
+    def to_json_dict(self) -> Dict[str, Any]:
+        return {
+            "date": self.date,
+            "total_cost": self.total_cost,
+            "request_count": self.request_count,
+            "daily_limit": self.daily_limit,
+            "is_exhausted": self.is_exhausted,
+            "last_exhausted_time": (
+                self.last_exhausted_time.isoformat()
+                if self.last_exhausted_time is not None
+                else None
+            ),
+        }
+
+    @classmethod
+    def from_json_dict(cls, data: Dict[str, Any]) -> "DailyUsageTracker":
+        raw_ts = data.get("last_exhausted_time")
+        last_ts: Optional[datetime] = None
+        if isinstance(raw_ts, str) and raw_ts:
+            try:
+                last_ts = datetime.fromisoformat(raw_ts)
+            except ValueError:
+                last_ts = None
+        return cls(
+            date=str(data.get("date", "")),
+            total_cost=float(data.get("total_cost", 0.0) or 0.0),
+            request_count=int(data.get("request_count", 0) or 0),
+            daily_limit=float(data.get("daily_limit", 10.0) or 10.0),
+            is_exhausted=bool(data.get("is_exhausted", False)),
+            last_exhausted_time=last_ts,
+        )
+
+
+def load_daily_usage_tracker(
+    usage_file: str,
+    *,
+    daily_limit: float,
+    logger=None,
+) -> DailyUsageTracker:
+    """Load daily usage from JSON (safe). Legacy .pkl files are ignored."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    os.makedirs(os.path.dirname(usage_file) or "logs", exist_ok=True)
+
+    # Prefer .json; also accept path that still ends in .pkl by mapping to .json
+    json_path = usage_file
+    if json_path.endswith(".pkl"):
+        json_path = json_path[:-4] + ".json"
+
+    try:
+        if os.path.exists(json_path):
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("usage file is not a JSON object")
+            tracker = DailyUsageTracker.from_json_dict(data)
+            if tracker.date != today:
+                return DailyUsageTracker(date=today, daily_limit=daily_limit)
+            tracker.daily_limit = daily_limit
+            if tracker.is_exhausted and tracker.total_cost < daily_limit:
+                tracker.is_exhausted = False
+            return tracker
+    except Exception as exc:
+        if logger is not None:
+            logger.warning(f"Failed to load daily tracker: {exc}")
+
+    return DailyUsageTracker(date=today, daily_limit=daily_limit)
+
+
+def save_daily_usage_tracker(usage_file: str, tracker: DailyUsageTracker, logger=None) -> None:
+    """Persist daily usage as JSON (not pickle)."""
+    json_path = usage_file
+    if json_path.endswith(".pkl"):
+        json_path = json_path[:-4] + ".json"
+    try:
+        os.makedirs(os.path.dirname(json_path) or "logs", exist_ok=True)
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(tracker.to_json_dict(), f, indent=2)
+    except Exception as exc:
+        if logger is not None:
+            logger.error(f"Failed to save daily tracker: {exc}")
+
 
 # ---------------------------------------------------------------------------
 # XAIClient — cost-tracking wrapper (delegates completions to OpenRouter)
@@ -77,8 +158,8 @@ class XAIClient(TradingLoggerMixin):
         self.total_cost = 0.0
         self.request_count = 0
 
-        # Daily usage tracking (persisted to disk)
-        self.usage_file = "logs/daily_ai_usage.pkl"
+        # Daily usage tracking (persisted to disk as JSON — never pickle)
+        self.usage_file = "logs/daily_ai_usage.json"
         self.daily_tracker = self._load_daily_tracker()
 
         # Lazy OpenRouter client (initialised on first LLM call)
@@ -98,34 +179,14 @@ class XAIClient(TradingLoggerMixin):
 
     def _load_daily_tracker(self) -> DailyUsageTracker:
         """Load or create daily usage tracker."""
-        today = datetime.now().strftime("%Y-%m-%d")
         daily_limit = getattr(settings.trading, "daily_ai_cost_limit", 10.0)
-        os.makedirs("logs", exist_ok=True)
-
-        try:
-            if os.path.exists(self.usage_file):
-                with open(self.usage_file, "rb") as f:
-                    tracker = pickle.load(f)
-                if tracker.date != today:
-                    tracker = DailyUsageTracker(date=today, daily_limit=daily_limit)
-                else:
-                    tracker.daily_limit = daily_limit
-                    if tracker.is_exhausted and tracker.total_cost < daily_limit:
-                        tracker.is_exhausted = False
-                return tracker
-        except Exception as e:
-            self.logger.warning(f"Failed to load daily tracker: {e}")
-
-        return DailyUsageTracker(date=today, daily_limit=daily_limit)
+        return load_daily_usage_tracker(
+            self.usage_file, daily_limit=daily_limit, logger=self.logger
+        )
 
     def _save_daily_tracker(self):
         """Save daily usage tracker to disk."""
-        try:
-            os.makedirs("logs", exist_ok=True)
-            with open(self.usage_file, "wb") as f:
-                pickle.dump(self.daily_tracker, f)
-        except Exception as e:
-            self.logger.error(f"Failed to save daily tracker: {e}")
+        save_daily_usage_tracker(self.usage_file, self.daily_tracker, logger=self.logger)
 
     def _update_daily_cost(self, cost: float):
         """Update daily cost tracking."""
