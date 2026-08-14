@@ -124,55 +124,48 @@ class AdvancedMarketMaker:
         
         for market in markets:
             try:
-                # Get current market data
                 market_data = await self.polymarket_client.get_market(market.market_id)
                 if not market_data:
                     continue
-                    
-                # Handle both new and old field formats
-                current_yes_price = float(market_data.get('yes_bid_dollars', 0) or market_data.get('yes_price', 0) or 0)
-                current_no_price = float(market_data.get('no_bid_dollars', 0) or market_data.get('no_price', 0) or 0)
-                
-                # Convert cents to dollars if needed
-                if current_yes_price > 1.0:
-                    current_yes_price = current_yes_price / 100.0
-                if current_no_price > 1.0:
-                    current_no_price = current_no_price / 100.0
-                
-                # Skip if prices are extreme (hard to make markets) - relaxed thresholds
+
+                # get_market returns {"market": {...}}; older callers used a flat dict.
+                envelope = market_data.get("market") if isinstance(market_data.get("market"), dict) else market_data
+
+                yes_bid = float(envelope.get("yes_bid_dollars") or 0)
+                yes_ask = float(envelope.get("yes_ask_dollars") or 0)
+                no_bid = float(envelope.get("no_bid_dollars") or 0)
+                no_ask = float(envelope.get("no_ask_dollars") or 0)
+                yes_px = float(envelope.get("yes_price") or 0)
+                no_px = float(envelope.get("no_price") or 0)
+                if yes_px > 1.0:
+                    yes_px = yes_px / 100.0
+                if no_px > 1.0:
+                    no_px = no_px / 100.0
+
+                current_yes_price = ((yes_bid + yes_ask) / 2) if (yes_bid or yes_ask) else yes_px
+                current_no_price = ((no_bid + no_ask) / 2) if (no_bid or no_ask) else no_px
+
                 if current_yes_price < 0.02 or current_yes_price > 0.98:
                     continue
-                
-                # Get AI prediction for edge calculation
-                analysis = await self._get_ai_analysis(market)
-                if not analysis:
+
+                spread = (yes_ask - yes_bid) if (yes_ask and yes_bid) else 0.0
+                if spread < self.min_spread:
                     continue
-                    
-                ai_prob = analysis.get('probability', 0.5)
-                ai_confidence = analysis.get('confidence', 0.5)
-                
-                # Apply edge filtering before creating market making opportunity
-                from src.utils.edge_filter import EdgeFilter
-                
-                # Check if either side meets edge requirements
-                yes_edge_result = EdgeFilter.calculate_edge(ai_prob, current_yes_price, ai_confidence)
-                no_edge_result = EdgeFilter.calculate_edge(1 - ai_prob, current_no_price, ai_confidence)
-                
-                # Only proceed if at least one side meets edge requirements
-                if yes_edge_result.passes_filter or no_edge_result.passes_filter:
-                    # Calculate market making opportunity
-                    opportunity = await self._calculate_market_making_opportunity(
-                        market, current_yes_price, current_no_price, ai_prob, ai_confidence
+
+                # Spread capture does not need a directional LLM call. Using
+                # mid as the fair value keeps MM off the Kimi quota.
+                opportunity = await self._calculate_market_making_opportunity(
+                    market, current_yes_price, current_no_price,
+                    current_yes_price, 0.5,
+                )
+                if opportunity and opportunity.total_expected_profit > 0:
+                    opportunities.append(opportunity)
+                    self.logger.info(
+                        f"✅ MARKET MAKING APPROVED: {market.market_id} "
+                        f"spread={spread:.3f}"
                     )
-                    
-                    if opportunity and opportunity.total_expected_profit > 0:
-                        opportunities.append(opportunity)
-                        self.logger.info(f"✅ MARKET MAKING APPROVED: {market.market_id} - YES edge: {yes_edge_result.edge_percentage:.1%}, NO edge: {no_edge_result.edge_percentage:.1%}")
-                else:
-                    self.logger.info(f"❌ MARKET MAKING FILTERED: {market.market_id} - Insufficient edge on both sides")
-                    
             except Exception as e:
-                self.logger.error(f"Error analyzing market {market.market_id}: {e}")
+                self.logger.warning(f"Skipping MM market {market.market_id}: {e}")
                 continue
         
         # Sort by expected profitability

@@ -28,6 +28,7 @@ from src.clients.polymarket_client import (
     UnknownMarketError,
     TokenIds,
     _classify_order_error,
+    _clob_tick_size,
     _normalize_order_response,
     _bids_to_levels,
     _asks_to_levels,
@@ -260,7 +261,7 @@ class TestPlaceOrder(unittest.TestCase):
         # Routing options carry tick_size / neg_risk (defaults from register_market)
         self.assertIsInstance(captured["options"], PartialCreateOrderOptions)
         self.assertEqual(captured["options"].neg_risk, False)
-        self.assertEqual(captured["options"].tick_size, 0.01)
+        self.assertEqual(captured["options"].tick_size, "0.01")
         # Response shape
         self.assertEqual(result["order"]["order_id"], "order-123")
         self.assertEqual(result["order"]["side"], "YES")
@@ -322,7 +323,7 @@ class TestPlaceOrder(unittest.TestCase):
             count=1, type_="limit", yes_price=35,
         ))
         self.assertTrue(captured["options"].neg_risk)
-        self.assertAlmostEqual(captured["options"].tick_size, 0.001)
+        self.assertEqual(captured["options"].tick_size, "0.001")
 
     def test_token_cache_persistence(self):
         """Persisting the token_id cache to disk lets a fresh process start
@@ -382,6 +383,17 @@ class TestPlaceOrder(unittest.TestCase):
                 ticker="0xunknown", client_order_id="x", side="yes",
                 action="buy", count=1, type_="market", yes_price=50,
             ))
+
+
+class TestClobTickSize(unittest.TestCase):
+    """Float ticks must become the string literals the SDK ROUNDING_CONFIG uses."""
+
+    def test_common_ticks(self):
+        self.assertEqual(_clob_tick_size(0.01), "0.01")
+        self.assertEqual(_clob_tick_size(0.001), "0.001")
+        self.assertEqual(_clob_tick_size("0.1"), "0.1")
+        self.assertEqual(_clob_tick_size(0), "0.01")
+        self.assertEqual(_clob_tick_size(None), "0.01")
 
 
 # --------------------------------------------------------------------------

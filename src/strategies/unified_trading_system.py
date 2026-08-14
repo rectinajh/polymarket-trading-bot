@@ -295,17 +295,31 @@ class UnifiedAdvancedTradingSystem:
         Execute market making strategy for spread profits.
         """
         try:
-            self.logger.info(f"🎯 Executing Market Making Strategy on {len(markets)} markets")
-            
-            # Analyze market making opportunities
-            opportunities = await self.market_maker.analyze_market_making_opportunities(markets)
+            # Cap the universe — scanning 600 markets means 1200 CLOB book
+            # fetches per cycle and trips rate limits. Directional already
+            # takes the top names; MM only needs a handful of liquid books.
+            mm_limit = 12
+            mm_markets = sorted(
+                markets, key=lambda m: getattr(m, "volume", 0) or 0, reverse=True
+            )[:mm_limit]
+            self.logger.info(
+                f"🎯 Executing Market Making Strategy on {len(mm_markets)} "
+                f"markets (of {len(markets)})"
+            )
+
+            opportunities = await self.market_maker.analyze_market_making_opportunities(mm_markets)
             
             if not opportunities:
                 self.logger.warning("No market making opportunities found")
                 return {'orders_placed': 0, 'expected_profit': 0.0}
             
             # Filter to top opportunities within capital allocation
-            max_opportunities = int(self.market_making_capital / 100)  # $100 per opportunity
+            # $100-per-opportunity was sized for a $10k book. On a ~$100
+            # wallet that rounded to zero and MM never placed anything.
+            if self.market_making_capital < 10:
+                max_opportunities = 0
+            else:
+                max_opportunities = max(1, int(self.market_making_capital / 25))
             top_opportunities = opportunities[:max_opportunities]
             
             # Execute market making
@@ -563,6 +577,7 @@ class UnifiedAdvancedTradingSystem:
                         self.logger.info(f"✅ Executed position: {market_id} {intended_side} {quantity} at {price:.3f}")
                     else:
                         results['failed_executions'] += 1
+                        await self.db_manager.update_position_status(position_id, "failed")
                         self.logger.error(f"❌ Failed to execute position for {market_id}")
                 
                 except Exception as e:

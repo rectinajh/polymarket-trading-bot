@@ -812,8 +812,11 @@ class PolymarketClient(TradingLoggerMixin):
         token_meta = self._token_cache.get(ticker)
         neg_risk = bool(token_meta.neg_risk) if token_meta else False
         tick_size = float(token_meta.tick_size) if token_meta else 0.01
+        # py-clob-client ROUNDING_CONFIG is keyed by strings ("0.01"). A float
+        # 0.01 raises KeyError(0.01) which we used to surface as
+        # `order failed: 0.01`.
         order_options = PartialCreateOrderOptions(
-            tick_size=tick_size, neg_risk=neg_risk,
+            tick_size=_clob_tick_size(tick_size), neg_risk=neg_risk,
         )
 
         # Resolve price hint (cents → dollars). Required for limit orders;
@@ -1080,6 +1083,23 @@ class PolymarketClient(TradingLoggerMixin):
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
+
+_CLOB_TICK_SIZES = ("0.1", "0.01", "0.001", "0.0001")
+
+
+def _clob_tick_size(tick: Any) -> str:
+    """Map a numeric tick to the string literals py-clob-client expects."""
+    try:
+        t = float(tick)
+    except (TypeError, ValueError):
+        return "0.01"
+    if t <= 0:
+        return "0.01"
+    for token in _CLOB_TICK_SIZES:
+        if abs(float(token) - t) < 1e-12:
+            return token
+    return min(_CLOB_TICK_SIZES, key=lambda token: abs(float(token) - t))
+
 
 def _safe_float(x: Any) -> float:
     try:

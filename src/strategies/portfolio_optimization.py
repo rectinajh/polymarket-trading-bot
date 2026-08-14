@@ -1087,10 +1087,10 @@ async def _evaluate_immediate_trade(
         # Calculate proper entry price (what we expect to pay)
         if side == "YES":
             entry_price = opportunity.market_probability  # Price for YES shares
-            shares = max(1, int(position_size / entry_price))  # Minimum 1 contract
+            shares = max(5, int(position_size / entry_price))  # CLOB min ~5 shares
         else:
             entry_price = 1 - opportunity.market_probability  # Price for NO shares  
-            shares = max(1, int(position_size / entry_price))  # Minimum 1 contract
+            shares = max(5, int(position_size / entry_price))  # CLOB min ~5 shares
         
         # Verify we can afford at least 1 contract
         min_cost = shares * entry_price
@@ -1179,6 +1179,7 @@ async def _evaluate_immediate_trade(
                 logger.info(f"✅ IMMEDIATE TRADE EXECUTED: {opportunity.market_id} - ${position_size:.0f} position")
             else:
                 logger.error(f"❌ IMMEDIATE TRADE FAILED: {opportunity.market_id}")
+                await db_manager.update_position_status(position_id, "failed")
         
     except Exception as e:
         logger.error(f"Error in immediate trade evaluation for {opportunity.market_id}: {e}")

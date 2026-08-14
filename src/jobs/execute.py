@@ -14,6 +14,9 @@ from src.utils.logging_setup import get_trading_logger
 from src.clients.polymarket_client import PolymarketClient, PolymarketAPIError
 from src.utils.market_prices import get_market_prices, is_tradeable_market
 
+# Polymarket CLOB rejects orders below this share count on most markets.
+MIN_CLOB_SHARES = 5
+
 async def execute_position(
     position: Position, 
     live_mode: bool, 
@@ -119,6 +122,12 @@ async def execute_position(
                 order_params["no_price"] = no_ask_cents
             
             logger.info(f"Placing order with params: {order_params}")
+            if int(position.quantity) < MIN_CLOB_SHARES:
+                logger.warning(
+                    f"⚠️  Skipping {position.market_id}: quantity={position.quantity} "
+                    f"is below the CLOB minimum of {MIN_CLOB_SHARES} shares."
+                )
+                return False
             order_response = await polymarket_client.place_order(**order_params)
             
             # For a market order, the fill price is not guaranteed.
