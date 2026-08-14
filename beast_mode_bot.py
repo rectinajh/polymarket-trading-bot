@@ -119,6 +119,21 @@ class BeastModeBot:
             gamma_client = GammaClient()
             polymarket_client = PolymarketClient(gamma_client=gamma_client)
 
+            if self.live_mode:
+                geo = await polymarket_client.check_geoblock()
+                if geo.get("blocked"):
+                    country = geo.get("country") or "unknown"
+                    self.logger.error(
+                        f"🚫 LIVE TRADING UNAVAILABLE: Polymarket geoblocks this "
+                        f"IP ({geo.get('ip')}) in {country}/{geo.get('region')}. "
+                        "New orders will be rejected. Falling back to paper "
+                        "trading. Move the bot to an allowed region — do not "
+                        "bypass geoblock with a proxy."
+                    )
+                    self.live_mode = False
+                    settings.trading.live_trading_enabled = False
+                    settings.trading.paper_trading_mode = True
+
             # LLM client — single-model with OpenRouter fallback chain. The
             # XAIClient name is historical; it routes through OpenRouter,
             # not xAI directly. Cost tracking lives on this client.

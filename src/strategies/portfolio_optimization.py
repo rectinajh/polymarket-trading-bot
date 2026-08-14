@@ -36,7 +36,7 @@ from src.clients.polymarket_client import PolymarketClient
 from src.clients.xai_client import XAIClient
 from src.config.settings import settings
 from src.utils.logging_setup import get_trading_logger
-from src.utils.market_prices import get_market_prices
+from src.utils.market_prices import get_market_prices, is_tradeable_market, has_live_orderbook
 
 
 @dataclass
@@ -828,27 +828,41 @@ async def create_market_opportunities_from_markets(
     logger = get_trading_logger("portfolio_opportunities")
     opportunities = []
     
-    # Limit markets to prevent excessive AI costs and focus on best opportunities
-    max_markets_to_analyze = 10  # REDUCED: More selective (was 20, now 10) to focus on highest quality
-    if len(markets) > max_markets_to_analyze:
-        # Sort by volume and take top markets
-        markets = sorted(markets, key=lambda m: m.volume, reverse=True)[:max_markets_to_analyze]
-        logger.info(f"Limited to top {max_markets_to_analyze} markets by volume for AI analysis")
+    # Lifetime volume often ranks resolved / unlisted tokens first. Scan a
+    # wider set, keep only markets that currently have a two-sided book, then
+    # spend the AI budget on those.
+    max_markets_to_analyze = 10
+    scan_limit = min(len(markets), 40)
+    ranked = sorted(markets, key=lambda m: getattr(m, "volume", 0) or 0, reverse=True)[:scan_limit]
+    logger.info(
+        f"Scanning {len(ranked)} markets by volume for up to "
+        f"{max_markets_to_analyze} tradeable books"
+    )
     
-    for market in markets:
+    analyzed = 0
+    skipped_no_book = 0
+    for market in ranked:
+        if analyzed >= max_markets_to_analyze:
+            break
         try:
-            # Get current market data
             market_data = await polymarket_client.get_market(market.market_id)
             if not market_data:
+                skipped_no_book += 1
                 continue
             
-            # FIXED: Extract from nested 'market' object (same fix as immediate trading)
-            market_info = market_data.get('market', {})
-            market_prob = market_info.get('yes_price', 50) / 100
+            market_info = market_data.get('market', {}) or {}
+            if not has_live_orderbook(market_info) or not is_tradeable_market(market_info):
+                skipped_no_book += 1
+                continue
+
+            yes_ask = float(market_info.get('yes_ask_dollars') or 0)
+            market_prob = yes_ask if 0 < yes_ask <= 1 else (market_info.get('yes_price', 50) / 100)
             
             # Skip markets with extreme prices (too risky for portfolio)
             if market_prob < 0.05 or market_prob > 0.95:
                 continue
+
+            analyzed += 1
             
             # Get REAL AI prediction using fast analysis
             predicted_prob, confidence = await _get_fast_ai_prediction(
@@ -916,7 +930,10 @@ async def create_market_opportunities_from_markets(
             logger.error(f"Error creating opportunity from {market.market_id}: {e}")
             continue
     
-    logger.info(f"Created {len(opportunities)} opportunities from {len(markets)} markets")
+    logger.info(
+        f"Created {len(opportunities)} opportunities from {analyzed} "
+        f"tradeable markets (scanned {len(ranked)}, skipped_no_book={skipped_no_book})"
+    )
     return opportunities
 
 async def _evaluate_immediate_trade(
@@ -1048,7 +1065,7 @@ async def _evaluate_immediate_trade(
         import aiosqlite
         async with aiosqlite.connect(db_manager.db_path) as db:
             cursor = await db.execute(
-                "SELECT COUNT(*) FROM positions WHERE market_id = ?",
+                "SELECT COUNT(*) FROM positions WHERE market_id = ? AND status = 'open'",
                 (opportunity.market_id,)
             )
             result = await cursor.fetchone()

@@ -49,6 +49,7 @@ DEFAULT_GAMMA_HOST = "https://gamma-api.polymarket.com"
 DEFAULT_DATA_HOST = "https://data-api.polymarket.com"  # positions/portfolio data
 DEFAULT_CHAIN_ID = 137  # Polygon mainnet
 DEFAULT_RPC_URL = "https://polygon-rpc.com"
+DEFAULT_GEOBLOCK_URL = "https://polymarket.com/api/geoblock"
 
 # On-disk cache for the condition_id → token_ids map. Persists across bot
 # restarts so we don't pay a Gamma round-trip on the first order after each
@@ -109,6 +110,10 @@ class UnknownMarketError(PolymarketAPIError):
 class AllowanceError(PolymarketAPIError):
     """USDC / CTF allowance not set on one of the Polymarket contracts.
     Run `python scripts/set_allowances.py` to provision them once per wallet."""
+
+
+class GeoblockError(PolymarketAPIError):
+    """This IP is in a region Polymarket does not allow to open new orders."""
 
 
 # --------------------------------------------------------------------------
@@ -230,6 +235,8 @@ class PolymarketClient(TradingLoggerMixin):
         )
         self._token_cache: Dict[str, TokenIds] = self._load_token_cache()
         self._gamma = gamma_client
+        self._geoblocked = False
+        self._geoblock_status: Optional[Dict[str, Any]] = None
 
         self.logger.info(
             "PolymarketClient initialized (lazy)",
@@ -737,6 +744,11 @@ class PolymarketClient(TradingLoggerMixin):
         try:
             return await asyncio.to_thread(_call)
         except Exception as exc:
+            msg = str(exc).lower()
+            if "404" in msg or "no orderbook" in msg:
+                # Lifetime-volume leaders are often resolved / unlisted tokens
+                # with no live book. Callers treat empty bids/asks as skip.
+                return None
             raise PolymarketAPIError(
                 f"get_order_book failed for token_id={token_id}: {exc}"
             ) from exc
@@ -775,6 +787,15 @@ class PolymarketClient(TradingLoggerMixin):
         # Hard safety gate: refuse CLOB orders unless live trading is enabled.
         # Callers in paper/DRY_RUN must not reach the SDK.
         from src.config.settings import settings as _settings
+        if self._geoblocked:
+            geo = self._geoblock_status or {}
+            raise GeoblockError(
+                "Trading restricted in this region "
+                f"(country={geo.get('country')}, ip={geo.get('ip')}). "
+                "Move the bot to a Polymarket-allowed jurisdiction; "
+                "do not try to bypass geoblock."
+            )
+
         if not _settings.trading.live_trading_enabled:
             raise PolymarketAPIError(
                 "Refusing to place order: live trading is disabled "
@@ -873,7 +894,10 @@ class PolymarketClient(TradingLoggerMixin):
         try:
             resp = await asyncio.to_thread(_send)
         except Exception as exc:
-            raise _classify_order_error(exc) from exc
+            classified = _classify_order_error(exc)
+            if isinstance(classified, GeoblockError):
+                self._geoblocked = True
+            raise classified from exc
 
         return _normalize_order_response(
             resp,
@@ -1064,6 +1088,51 @@ class PolymarketClient(TradingLoggerMixin):
             "Attach a GammaClient with get_price_history() (Step 3)."
         )
 
+    async def check_geoblock(self) -> Dict[str, Any]:
+        """Ask Polymarket whether this host's IP may open new orders.
+
+        Docs: GET https://polymarket.com/api/geoblock
+        Does not bypass restrictions; callers should fall back to paper
+        trading when `blocked` is true.
+        """
+
+        def _call() -> Dict[str, Any]:
+            import urllib.request
+
+            req = urllib.request.Request(
+                DEFAULT_GEOBLOCK_URL,
+                headers={"User-Agent": "polymarket-trading-bot/geoblock-check"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.loads(resp.read().decode())
+
+        try:
+            data = await asyncio.to_thread(_call)
+        except Exception as exc:
+            self.logger.warning(f"geoblock check failed: {exc}")
+            return {"blocked": False, "error": str(exc)}
+
+        if not isinstance(data, dict):
+            return {"blocked": False, "error": "unexpected geoblock payload"}
+
+        self._geoblock_status = data
+        if data.get("blocked"):
+            self._geoblocked = True
+            self.logger.error(
+                "Polymarket geoblock: this IP cannot open new orders",
+                country=data.get("country"),
+                region=data.get("region"),
+                ip=data.get("ip"),
+            )
+        else:
+            self._geoblocked = False
+            self.logger.info(
+                "Polymarket geoblock: trading allowed",
+                country=data.get("country"),
+                region=data.get("region"),
+            )
+        return data
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -1168,6 +1237,8 @@ def _classify_order_error(exc: Exception) -> Exception:
         return RateLimitError(str(exc))
     if "signature" in msg or "unauthorized" in msg or "401" in msg:
         return PolymarketAuthError(str(exc))
+    if "geoblock" in msg or "trading restricted in your region" in msg:
+        return GeoblockError(str(exc))
     return PolymarketAPIError(f"order failed: {exc}")
 
 

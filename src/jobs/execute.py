@@ -11,7 +11,11 @@ from typing import Optional, Dict
 from src.utils.database import DatabaseManager, Position
 from src.config.settings import settings
 from src.utils.logging_setup import get_trading_logger
-from src.clients.polymarket_client import PolymarketClient, PolymarketAPIError
+from src.clients.polymarket_client import (
+    PolymarketClient,
+    PolymarketAPIError,
+    GeoblockError,
+)
 from src.utils.market_prices import get_market_prices, is_tradeable_market
 
 # Polymarket CLOB rejects orders below this share count on most markets.
@@ -141,6 +145,15 @@ async def execute_position(
             logger.info(f"💰 Real money used: ${position.quantity * fill_price:.2f}")
             return True
 
+        except GeoblockError as e:
+            logger.error(
+                f"❌ GEOBLOCK: live buys are not allowed from this IP. {e} "
+                "Disabling live trading for this process; switch to a "
+                "Polymarket-allowed region to open new orders."
+            )
+            settings.trading.live_trading_enabled = False
+            settings.trading.paper_trading_mode = True
+            return False
         except PolymarketAPIError as e:
             logger.error(f"❌ FAILED to place LIVE order for {position.market_id}: {e}")
             return False

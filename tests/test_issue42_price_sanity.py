@@ -17,7 +17,7 @@ import pytest
 from datetime import datetime
 from unittest.mock import AsyncMock, Mock
 
-from src.utils.market_prices import is_tradeable_market, get_market_prices
+from src.utils.market_prices import is_tradeable_market, get_market_prices, has_live_orderbook
 from src.utils.database import Position
 
 pytestmark = pytest.mark.asyncio
@@ -76,6 +76,11 @@ class TestIsTradeableMarket:
         """Typical 50/50 market is tradeable."""
         market = self._v2_market(yes_ask=0.52, no_ask=0.50)
         assert is_tradeable_market(market) is True
+        assert has_live_orderbook(market) is True
+
+    def test_empty_book_is_not_live(self):
+        market = self._v2_market(yes_ask=0.0, no_ask=0.0)
+        assert has_live_orderbook(market) is False
 
     def test_normal_market_legacy(self):
         """Typical legacy 50/50 market is tradeable."""

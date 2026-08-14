@@ -41,6 +41,12 @@ def is_tradeable_market(market_info: Dict[str, Any]) -> bool:
     return True
 
 
+def has_live_orderbook(market_info: Dict[str, Any]) -> bool:
+    """True when both YES and NO sides currently quote an ask."""
+    _, yes_ask, _, no_ask = get_market_prices(market_info)
+    return yes_ask > 0 and no_ask > 0
+
+
 def get_market_prices(market_info: Dict[str, Any]) -> Tuple[float, float, float, float]:
     """
     Extract and normalize market prices from a Polymarket CLOB market object.

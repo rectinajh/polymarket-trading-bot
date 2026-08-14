@@ -25,6 +25,7 @@ from src.clients.polymarket_client import (
     InsufficientFundsError,
     AllowanceError,
     RateLimitError,
+    GeoblockError,
     UnknownMarketError,
     TokenIds,
     _classify_order_error,
@@ -227,6 +228,17 @@ class TestPlaceOrder(unittest.TestCase):
             ))
         self.assertIn("live trading is disabled", str(ctx.exception).lower())
 
+    def test_place_order_blocked_when_geoblocked(self):
+        c = self._setup_client()
+        c._geoblocked = True
+        c._geoblock_status = {"country": "FR", "ip": "1.2.3.4"}
+        with self.assertRaises(GeoblockError) as ctx:
+            _run(c.place_order(
+                ticker="0xabc", client_order_id="cid-geo", side="yes", action="buy",
+                count=10, type_="limit", yes_price=35,
+            ))
+        self.assertIn("restricted", str(ctx.exception).lower())
+
     def test_limit_yes_buy_converts_cents_to_dollars(self):
         c = self._setup_client()
         from py_clob_client.clob_types import OrderArgs, OrderType, PartialCreateOrderOptions
@@ -424,7 +436,15 @@ class TestErrorClassification(unittest.TestCase):
     def test_generic_fallback(self):
         exc = _classify_order_error(RuntimeError("Some unrelated error"))
         self.assertIsInstance(exc, PolymarketAPIError)
-        self.assertNotIsInstance(exc, (InsufficientFundsError, AllowanceError, RateLimitError, PolymarketAuthError))
+        self.assertNotIsInstance(exc, (InsufficientFundsError, AllowanceError, RateLimitError, PolymarketAuthError, GeoblockError))
+
+    def test_geoblock(self):
+        exc = _classify_order_error(RuntimeError(
+            "PolyApiException[status_code=403, error_message={'error': "
+            "'Trading restricted in your region, please refer to available "
+            "regions - https://docs.polymarket.com/developers/CLOB/geoblock'}]"
+        ))
+        self.assertIsInstance(exc, GeoblockError)
 
 
 # --------------------------------------------------------------------------
@@ -478,6 +498,23 @@ class TestOrderbookHelpers(unittest.TestCase):
             asks = []
         self.assertEqual(_best_bid_dollars(Empty), 0.0)
         self.assertEqual(_best_ask_dollars(Empty), 0.0)
+
+
+class TestMissingOrderbook(unittest.TestCase):
+    """A 404 'no orderbook' must not abort the whole scan as an error."""
+
+    def test_fetch_book_one_returns_none_on_404(self):
+        c = PolymarketClient(private_key=DUMMY_PK)
+        client = MagicMock()
+        client.get_order_book.side_effect = RuntimeError(
+            "PolyApiException[status_code=404, error_message="
+            "{'error': 'No orderbook exists for the requested token id'}]"
+        )
+        with patch.object(c, "_ensure_clob", return_value=client):
+            result = _run(c._fetch_book_one("tok"))
+        self.assertIsNone(result)
+        self.assertEqual(_best_ask_dollars(result), 0.0)
+        self.assertEqual(_best_bid_dollars(result), 0.0)
 
 
 # --------------------------------------------------------------------------
