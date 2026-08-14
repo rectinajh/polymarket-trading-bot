@@ -364,11 +364,18 @@ class PolymarketClient(TradingLoggerMixin):
             return self._w3
         try:
             from web3 import Web3
+            from web3.middleware import ExtraDataToPOAMiddleware
         except ImportError as exc:
             raise PolymarketAPIError(
                 "web3 is not installed. Run `pip install -r requirements.txt`."
             ) from exc
         self._w3 = Web3(Web3.HTTPProvider(self.polygon_rpc_url))
+        # Polygon is a POA chain — without this, eth_getBlockByNumber can fail
+        # with ExtraDataLengthError and balance reads become flaky.
+        try:
+            self._w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+        except Exception:
+            pass
         return self._w3
 
     def _get_signer_address(self) -> str:
@@ -566,10 +573,85 @@ class PolymarketClient(TradingLoggerMixin):
             "portfolio_value":         int(round(portfolio_dollars * 100)),
             "portfolio_value_dollars": portfolio_dollars,
             "address":                 addr,
+            "eoa_address":             self._get_signer_address(),
+            "funder_address":          addr,
             "collateral_token":        collateral,
             "pusd_dollars":            pusd_dollars,
             "usdc_e_dollars":          usdc_dollars,
         }
+
+    async def get_recent_collateral_deposits(
+        self, *, lookback_blocks: int = 50_000, limit: int = 20
+    ) -> List[Dict[str, Any]]:
+        """Return recent pUSD Transfer-in events to the funding (deposit) wallet.
+
+        Used by the dashboard to show deposit address + inbound amounts + tx
+        hashes. Public RPCs often cap eth_getLogs to ~10k blocks, so we page.
+        """
+        addr = self._get_funding_address()
+
+        def _fetch() -> List[Dict[str, Any]]:
+            from web3 import Web3
+
+            w3 = self._ensure_w3()
+            token = w3.to_checksum_address(PUSD_POLYGON)
+            to_addr = w3.to_checksum_address(addr)
+            latest = int(w3.eth.block_number)
+            from_block = max(0, latest - int(lookback_blocks))
+            transfer_topic = w3.keccak(text="Transfer(address,address,uint256)")
+            to_topic = "0x" + ("0" * 24) + to_addr[2:].lower()
+
+            chunk = 9_000
+            logs: List[Any] = []
+            start = from_block
+            while start <= latest:
+                end = min(start + chunk - 1, latest)
+                try:
+                    batch = w3.eth.get_logs(
+                        {
+                            "fromBlock": start,
+                            "toBlock": end,
+                            "address": token,
+                            "topics": [transfer_topic, None, to_topic],
+                        }
+                    )
+                    logs.extend(batch or [])
+                except Exception as exc:
+                    self.logger.debug(
+                        f"deposit log chunk {start}-{end} failed: {exc}"
+                    )
+                start = end + 1
+
+            out: List[Dict[str, Any]] = []
+            for log in logs[-limit:]:
+                fr = "0x" + log["topics"][1].hex()[-40:]
+                raw = log["data"]
+                raw_hex = raw.hex() if hasattr(raw, "hex") else str(raw)
+                if raw_hex.startswith("0x"):
+                    raw_hex = raw_hex[2:]
+                amount = int(raw_hex or "0", 16) / 1_000_000
+                txh = log["transactionHash"]
+                tx_hash = txh.hex() if hasattr(txh, "hex") else str(txh)
+                if not tx_hash.startswith("0x"):
+                    tx_hash = "0x" + tx_hash
+                out.append(
+                    {
+                        "tx_hash": tx_hash,
+                        "from": Web3.to_checksum_address(fr),
+                        "to": to_addr,
+                        "amount_dollars": amount,
+                        "block_number": int(log["blockNumber"]),
+                        "token": "pUSD",
+                    }
+                )
+            out.reverse()  # newest first
+            return out
+
+        try:
+            return await asyncio.to_thread(_fetch)
+        except Exception as exc:
+            self.logger.warning(f"get_recent_collateral_deposits failed: {exc}")
+            return []
 
     async def get_allowance(self, spender: str) -> int:
         """Read the pUSD allowance granted to `spender` from the funding

@@ -324,6 +324,22 @@ class DatabaseManager(TradingLoggerMixin):
             )
         """)
 
+        # Equity curve snapshots for dashboard capital / profit charts
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS equity_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                cash_dollars REAL NOT NULL,
+                position_value REAL NOT NULL,
+                portfolio_value REAL NOT NULL,
+                realized_pnl REAL NOT NULL DEFAULT 0,
+                source TEXT NOT NULL DEFAULT 'dashboard'
+            )
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_equity_snapshots_ts ON equity_snapshots(ts)"
+        )
+
         # Create indices for performance
         await db.execute("CREATE INDEX IF NOT EXISTS idx_market_analyses_market_id ON market_analyses(market_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_market_analyses_timestamp ON market_analyses(analysis_timestamp)")
@@ -1056,6 +1072,100 @@ class DatabaseManager(TradingLoggerMixin):
                 self.logger.info(f"Archived {closed} paper open positions")
             return closed
 
+    async def record_equity_snapshot(
+        self,
+        *,
+        cash_dollars: float,
+        position_value: float,
+        portfolio_value: float,
+        realized_pnl: float = 0.0,
+        source: str = "dashboard",
+        min_interval_seconds: int = 30,
+    ) -> bool:
+        """Insert an equity snapshot unless one was written too recently.
+
+        Returns True when a row was inserted.
+        """
+        now = datetime.now()
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS equity_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts TEXT NOT NULL,
+                    cash_dollars REAL NOT NULL,
+                    position_value REAL NOT NULL,
+                    portfolio_value REAL NOT NULL,
+                    realized_pnl REAL NOT NULL DEFAULT 0,
+                    source TEXT NOT NULL DEFAULT 'dashboard'
+                )
+            """)
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_equity_snapshots_ts ON equity_snapshots(ts)"
+            )
+            cursor = await db.execute(
+                "SELECT ts FROM equity_snapshots ORDER BY id DESC LIMIT 1"
+            )
+            row = await cursor.fetchone()
+            if row:
+                try:
+                    last_ts = datetime.fromisoformat(row[0])
+                    if (now - last_ts).total_seconds() < min_interval_seconds:
+                        return False
+                except (TypeError, ValueError):
+                    pass
+            await db.execute(
+                """
+                INSERT INTO equity_snapshots
+                    (ts, cash_dollars, position_value, portfolio_value, realized_pnl, source)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    now.isoformat(timespec="seconds"),
+                    float(cash_dollars),
+                    float(position_value),
+                    float(portfolio_value),
+                    float(realized_pnl),
+                    source,
+                ),
+            )
+            await db.commit()
+            return True
+
+    async def get_equity_snapshots(self, hours: float = 24.0) -> List[Dict]:
+        """Return equity snapshots newer than `hours` ago, oldest first."""
+        cutoff = datetime.now() - timedelta(hours=float(hours))
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS equity_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts TEXT NOT NULL,
+                    cash_dollars REAL NOT NULL,
+                    position_value REAL NOT NULL,
+                    portfolio_value REAL NOT NULL,
+                    realized_pnl REAL NOT NULL DEFAULT 0,
+                    source TEXT NOT NULL DEFAULT 'dashboard'
+                )
+            """)
+            cursor = await db.execute(
+                """
+                SELECT ts, cash_dollars, position_value, portfolio_value, realized_pnl, source
+                FROM equity_snapshots
+                WHERE ts >= ?
+                ORDER BY ts ASC
+                """,
+                (cutoff.isoformat(timespec="seconds"),),
+            )
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+    async def get_realized_pnl_total(self) -> float:
+        """Sum of closed-trade PnL from trade_logs (0 if empty)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("SELECT COALESCE(SUM(pnl), 0) FROM trade_logs")
+            row = await cursor.fetchone()
+            return float(row[0] or 0) if row else 0.0
+
 if __name__ == "__main__":
     import asyncio
     import os
@@ -1065,6 +1175,6 @@ if __name__ == "__main__":
         manager = DatabaseManager(db_path=db_path)
         await manager.initialize()
         print(f"✅ Database initialized at {os.path.abspath(db_path)}")
-        print("   Tables: markets, positions, trade_logs, market_analyses, daily_cost_tracking, llm_queries, analysis_reports")
+        print("   Tables: markets, positions, trade_logs, market_analyses, daily_cost_tracking, llm_queries, analysis_reports, equity_snapshots")
 
     asyncio.run(_init())

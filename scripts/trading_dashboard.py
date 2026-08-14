@@ -30,7 +30,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_ROOT))
 
 from dotenv import load_dotenv
-load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv(PROJECT_ROOT / ".env", override=True)
 
 from src.utils.database import DatabaseManager
 from src.clients import build_polymarket_clients
@@ -133,7 +133,7 @@ def read_latest_logs(lines: int = 200, level_filter: str = "ALL") -> tuple[str, 
 
 # @st.cache_data(ttl=60)  # Cache for 1 minute - temporarily disabled
 def load_performance_data():
-    """Load performance data from DB + live positions from Polymarket CLOB."""
+    """Load strategy stats + positions (DB TP/SL merged with live CLOB prices) + open orders."""
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -143,7 +143,6 @@ def load_performance_data():
         async def get_data():
             await db_manager.initialize()
 
-            # Strategy performance from local DB
             performance_raw = await db_manager.get_performance_by_strategy()
             performance = {}
             if performance_raw:
@@ -153,9 +152,15 @@ def load_performance_data():
                         for k, v in stats.items()
                     }
 
-            # Live positions from Polymarket — already include current_price
-            # and avg_price from the CLOB data API (no per-market round-trips).
+            # DB positions carry stop-loss / take-profit / max_hold / strategy.
+            db_positions = await db_manager.get_open_live_positions()
+            db_by_key = {}
+            for p in db_positions:
+                key = (str(p.market_id).lower(), str(p.side).upper())
+                db_by_key[key] = p
+
             positions = []
+            open_orders = []
             async with build_polymarket_clients() as (client, _gamma):
                 try:
                     positions_response = await client.get_positions()
@@ -163,37 +168,121 @@ def load_performance_data():
                     st.warning(f"Could not fetch Polymarket positions: {exc}")
                     positions_response = {"market_positions": []}
 
+                live_keys = set()
                 for pos in positions_response.get("market_positions", []):
                     size = float(pos.get("size", 0) or 0)
                     if size <= 0:
                         continue
-                    cond = pos.get("condition_id") or pos.get("ticker") or ""
+                    cond = str(pos.get("condition_id") or pos.get("ticker") or "")
+                    side = str(pos.get("side", "YES")).upper()
+                    if side in ("BUY", "LONG"):
+                        side = "YES"
+                    elif side in ("SELL", "SHORT"):
+                        side = "NO"
+                    key = (cond.lower(), side)
+                    live_keys.add(key)
+                    dbp = db_by_key.get(key)
+                    entry = float(pos.get("avg_price", 0) or 0)
+                    cur = float(pos.get("current_price", 0) or 0)
+                    qty = int(size) if size >= 1 else size
+                    unrealized = (cur - entry) * float(size) if side == "YES" else (entry - cur) * float(size)
+                    dist_sl = None
+                    dist_tp = None
+                    sl = dbp.stop_loss_price if dbp else None
+                    tp = dbp.take_profit_price if dbp else None
+                    if sl and cur:
+                        dist_sl = cur - float(sl) if side == "YES" else float(sl) - cur
+                    if tp and cur:
+                        dist_tp = float(tp) - cur if side == "YES" else cur - float(tp)
+
                     positions.append({
-                        "market_id":   str(cond),
-                        "condition_id": str(cond),
-                        "token_id":    str(pos.get("token_id", "")),
-                        "side":        pos.get("side", "YES"),
-                        "quantity":    int(size),
-                        "entry_price": float(pos.get("avg_price", 0) or 0),
-                        "current_price": float(pos.get("current_price", 0) or 0),
+                        "id": getattr(dbp, "id", None) if dbp else None,
+                        "market_id": cond,
+                        "condition_id": cond,
+                        "token_id": str(pos.get("token_id", "")),
+                        "side": side,
+                        "quantity": qty,
+                        "entry_price": entry or (float(dbp.entry_price) if dbp else 0.0),
+                        "current_price": cur,
+                        "unrealized_pnl": round(unrealized, 4),
                         "realized_pnl": float(pos.get("realized_pnl_dollars", 0) or 0),
-                        "timestamp":   datetime.now().isoformat(),
-                        "strategy":    "live_sync",
-                        "status":      "open",
-                        "stop_loss_price":   None,
-                        "take_profit_price": None,
+                        "timestamp": (dbp.timestamp.isoformat() if dbp and dbp.timestamp else datetime.now().isoformat()),
+                        "strategy": (dbp.strategy if dbp and dbp.strategy else "live_sync"),
+                        "status": "open",
+                        "live": True,
+                        "stop_loss_price": sl,
+                        "take_profit_price": tp,
+                        "max_hold_hours": dbp.max_hold_hours if dbp else None,
+                        "confidence": dbp.confidence if dbp else None,
+                        "dist_to_sl": round(dist_sl, 4) if dist_sl is not None else None,
+                        "dist_to_tp": round(dist_tp, 4) if dist_tp is not None else None,
+                        "source": "clob+db" if dbp else "clob_only",
                     })
 
-            await db_manager.close()
-            return performance, positions
+                # DB-only opens not yet visible on CLOB (pending / indexing lag)
+                for key, dbp in db_by_key.items():
+                    if key in live_keys:
+                        continue
+                    positions.append({
+                        "id": dbp.id,
+                        "market_id": dbp.market_id,
+                        "condition_id": dbp.market_id,
+                        "token_id": "",
+                        "side": dbp.side,
+                        "quantity": dbp.quantity,
+                        "entry_price": float(dbp.entry_price),
+                        "current_price": None,
+                        "unrealized_pnl": None,
+                        "realized_pnl": 0.0,
+                        "timestamp": dbp.timestamp.isoformat() if dbp.timestamp else datetime.now().isoformat(),
+                        "strategy": dbp.strategy or "unknown",
+                        "status": dbp.status,
+                        "live": bool(dbp.live),
+                        "stop_loss_price": dbp.stop_loss_price,
+                        "take_profit_price": dbp.take_profit_price,
+                        "max_hold_hours": dbp.max_hold_hours,
+                        "confidence": dbp.confidence,
+                        "dist_to_sl": None,
+                        "dist_to_tp": None,
+                        "source": "db_only",
+                    })
 
-        performance, positions = loop.run_until_complete(get_data())
+                try:
+                    orders_resp = await client.get_orders()
+                    for o in orders_resp.get("orders", []) or []:
+                        created = o.get("created_at") or ""
+                        try:
+                            ts = int(created)
+                            if ts > 10_000_000_000:
+                                ts //= 1000
+                            when = datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S UTC")
+                        except Exception:
+                            when = str(created)
+                        open_orders.append({
+                            "order_id": o.get("order_id") or o.get("id") or "",
+                            "status": o.get("status") or "",
+                            "side": o.get("side") or "",
+                            "outcome": o.get("outcome") or "",
+                            "price": float(o.get("price_dollars") or o.get("price") or 0),
+                            "size": float(o.get("original_size") or o.get("count") or 0),
+                            "matched": float(o.get("size_matched") or 0),
+                            "order_type": o.get("order_type") or "",
+                            "market": (o.get("market") or o.get("condition_id") or "")[:20] + "…",
+                            "created": when,
+                        })
+                except Exception as exc:
+                    st.warning(f"Could not fetch open orders: {exc}")
+
+            await db_manager.close()
+            return performance, positions, open_orders
+
+        performance, positions, open_orders = loop.run_until_complete(get_data())
         loop.close()
-        return performance, positions
+        return performance, positions, open_orders
 
     except Exception as e:
         st.error(f"Error loading performance data: {e}")
-        return {}, []
+        return {}, [], []
 
 # @st.cache_data(ttl=30)  # Cache for 30 seconds - temporarily disabled
 def load_llm_data():
@@ -241,10 +330,9 @@ def load_llm_data():
         st.error(f"Error loading LLM data: {e}")
         return [], {}
 
-@st.cache_data(ttl=300)  # Cache for 5 minutes
+@st.cache_data(ttl=30)  # Refresh often — live cash / deposits move quickly
 def load_system_health():
-    """Load USDC.e cash + Polymarket position MTM. Wallet address included so the
-    operator can sanity-check which Polygon wallet the dashboard is reading."""
+    """Load pUSD cash + position MTM + deposit wallet + recent fills/deposits."""
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -252,14 +340,16 @@ def load_system_health():
         async def get_health():
             async with build_polymarket_clients() as (client, _gamma):
                 balance_response = await client.get_balance()
-                available_cash = float(balance_response.get("balance_dollars", 0))
+                available_cash = float(balance_response.get("balance_dollars", 0) or 0)
                 wallet_address = balance_response.get("address", "?")
+                eoa_address = balance_response.get("eoa_address") or "?"
+                collateral_token = balance_response.get("collateral_token") or "pUSD"
+                pusd_dollars = float(balance_response.get("pusd_dollars", 0) or 0)
+                usdc_e_dollars = float(balance_response.get("usdc_e_dollars", 0) or 0)
 
                 positions_response = await client.get_positions()
                 market_positions = positions_response.get("market_positions", [])
 
-                # MTM = sum(size × current_price) — Polymarket's data API gives
-                # `current_price` per position natively, so no per-market loop.
                 total_position_value = 0.0
                 positions_count = 0
                 for pos in market_positions:
@@ -271,39 +361,99 @@ def load_system_health():
                     total_position_value += size * cur
 
                 total_portfolio_value = available_cash + total_position_value
-                return (
-                    available_cash,
-                    total_portfolio_value,
-                    positions_count,
-                    total_position_value,
-                    wallet_address,
-                )
 
-        (
-            available_cash,
-            total_portfolio_value,
-            positions_count,
-            position_value,
-            wallet_address,
-        ) = loop.run_until_complete(get_health())
+                recent_trades: list = []
+                try:
+                    trades_resp = await client.get_trades(limit=25)
+                    for t in trades_resp.get("trades", [])[:25]:
+                        txh = t.get("transaction_hash") or t.get("transactionHash") or ""
+                        match_ts = t.get("match_time") or t.get("last_update") or ""
+                        try:
+                            ts_int = int(match_ts)
+                            # Polymarket sometimes returns ms-scale timestamps
+                            if ts_int > 10_000_000_000:
+                                ts_int //= 1000
+                            when = datetime.utcfromtimestamp(ts_int).strftime("%Y-%m-%d %H:%M:%S UTC")
+                        except Exception:
+                            when = str(match_ts)
+                        recent_trades.append(
+                            {
+                                "when": when,
+                                "side": t.get("side") or "",
+                                "outcome": t.get("outcome") or "",
+                                "size": float(t.get("size", 0) or 0),
+                                "price": float(t.get("price", 0) or 0),
+                                "status": t.get("status") or "",
+                                "market": (t.get("market") or "")[:18] + "…",
+                                "tx_hash": txh,
+                            }
+                        )
+                except Exception as exc:
+                    st.warning(f"Could not fetch recent trades: {exc}")
+
+                recent_deposits: list = []
+                try:
+                    recent_deposits = await client.get_recent_collateral_deposits(
+                        lookback_blocks=40_000, limit=15
+                    )
+                except Exception as exc:
+                    st.warning(f"Could not fetch recent deposits: {exc}")
+
+                equity_snapshots: list = []
+                realized_pnl = 0.0
+                try:
+                    dbm = DatabaseManager()
+                    await dbm.initialize()
+                    realized_pnl = await dbm.get_realized_pnl_total()
+                    await dbm.record_equity_snapshot(
+                        cash_dollars=available_cash,
+                        position_value=total_position_value,
+                        portfolio_value=total_portfolio_value,
+                        realized_pnl=realized_pnl,
+                        source="dashboard",
+                        min_interval_seconds=30,
+                    )
+                    equity_snapshots = await dbm.get_equity_snapshots(hours=24 * 7)
+                    await dbm.close()
+                except Exception as exc:
+                    st.warning(f"Equity snapshot unavailable: {exc}")
+
+                return {
+                    "available_cash": available_cash,
+                    "total_portfolio_value": total_portfolio_value,
+                    "positions_count": positions_count,
+                    "position_value": total_position_value,
+                    "wallet_address": wallet_address,
+                    "eoa_address": eoa_address,
+                    "collateral_token": collateral_token,
+                    "pusd_dollars": pusd_dollars,
+                    "usdc_e_dollars": usdc_e_dollars,
+                    "recent_trades": recent_trades,
+                    "recent_deposits": recent_deposits,
+                    "equity_snapshots": equity_snapshots,
+                    "realized_pnl": realized_pnl,
+                }
+
+        result = loop.run_until_complete(get_health())
         loop.close()
-
-        return {
-            "available_cash":         available_cash,
-            "total_portfolio_value":  total_portfolio_value,
-            "positions_count":        positions_count,
-            "position_value":         position_value,
-            "wallet_address":         wallet_address,
-        }
+        return result
 
     except Exception as e:
         st.error(f"Error loading system health: {e}")
         return {
-            "available_cash":        0.0,
+            "available_cash": 0.0,
             "total_portfolio_value": 0.0,
-            "positions_count":       0,
-            "position_value":        0.0,
-            "wallet_address":        "?",
+            "positions_count": 0,
+            "position_value": 0.0,
+            "wallet_address": "?",
+            "eoa_address": "?",
+            "collateral_token": "pUSD",
+            "pusd_dollars": 0.0,
+            "usdc_e_dollars": 0.0,
+            "recent_trades": [],
+            "recent_deposits": [],
+            "equity_snapshots": [],
+            "realized_pnl": 0.0,
         }
 
 def main():
@@ -337,7 +487,7 @@ def main():
 
     # Load data with error handling
     try:
-        performance_data, positions = load_performance_data()
+        performance_data, positions, open_orders = load_performance_data()
         llm_queries, llm_stats = load_llm_data()
         system_health_data = load_system_health()
     except Exception as e:
@@ -347,27 +497,35 @@ def main():
 
     # Show wallet + data status in sidebar
     wallet = system_health_data.get("wallet_address", "?")
+    eoa = system_health_data.get("eoa_address", "?")
+    token = system_health_data.get("collateral_token", "pUSD")
     st.sidebar.markdown("---")
-    st.sidebar.markdown("**🔑 Polygon Wallet (funder):**")
+    st.sidebar.markdown("**🏦 Deposit Wallet (proxy / funder):**")
     if wallet and wallet != "?":
         st.sidebar.code(wallet, language="text")
         st.sidebar.caption(
-            f"[View on PolygonScan](https://polygonscan.com/address/{wallet})",
-            unsafe_allow_html=False,
+            f"[PolygonScan](https://polygonscan.com/address/{wallet})"
         )
     else:
-        st.sidebar.warning("Wallet address unavailable — check POLYMARKET_PRIVATE_KEY in .env")
+        st.sidebar.warning("Deposit wallet unavailable — check POLYMARKET_FUNDER")
+    if eoa and eoa != "?" and eoa.lower() != str(wallet).lower():
+        st.sidebar.markdown("**🔑 Signer EOA:**")
+        st.sidebar.code(eoa, language="text")
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("**📊 Data Status:**")
     st.sidebar.metric("Active Positions", len(positions) if positions else 0)
+    st.sidebar.metric("Open Orders", len(open_orders) if open_orders else 0)
     st.sidebar.metric("LLM Queries (24h)", len(llm_queries) if llm_queries else 0)
-    st.sidebar.metric("USDC.e Balance", f"${system_health_data.get('available_cash', 0):.2f}")
+    st.sidebar.metric(
+        f"{token} Cash",
+        f"${system_health_data.get('pusd_dollars', system_health_data.get('available_cash', 0)):.2f}",
+    )
     st.sidebar.metric("Portfolio MTM", f"${system_health_data.get('total_portfolio_value', 0):.2f}")
     
     # Page routing
     if page == "📈 Overview":
-        show_overview(performance_data, positions, system_health_data)
+        show_overview(performance_data, positions, system_health_data, open_orders)
     elif page == "📋 Live Logs":
         show_live_logs()
     elif page == "🎯 Strategy Performance":
@@ -375,16 +533,290 @@ def main():
     elif page == "🤖 LLM Analysis":
         show_llm_analysis(llm_queries, llm_stats)
     elif page == "💼 Positions & Trades":
-        show_positions_trades(positions)
+        show_positions_trades(positions, open_orders)
     elif page == "⚠️ Risk Management":
         show_risk_management(performance_data, positions, system_health_data['total_portfolio_value'])
     elif page == "🔧 System Health":
         show_system_health(system_health_data['available_cash'], system_health_data['positions_count'], llm_stats)
 
-def show_overview(performance_data, positions, system_health_data):
+def _filter_equity_snapshots(snapshots: list, hours: float) -> pd.DataFrame:
+    """Filter equity snapshots to the last `hours` and add profit vs window start."""
+    if not snapshots:
+        return pd.DataFrame()
+    cutoff = datetime.now() - timedelta(hours=float(hours))
+    rows = []
+    for s in snapshots:
+        try:
+            ts = datetime.fromisoformat(str(s.get("ts")))
+        except (TypeError, ValueError):
+            continue
+        if ts < cutoff:
+            continue
+        rows.append(
+            {
+                "ts": ts,
+                "portfolio_value": float(s.get("portfolio_value") or 0),
+                "cash_dollars": float(s.get("cash_dollars") or 0),
+                "position_value": float(s.get("position_value") or 0),
+                "realized_pnl": float(s.get("realized_pnl") or 0),
+            }
+        )
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows).sort_values("ts")
+    baseline = float(df["portfolio_value"].iloc[0])
+    df["profit"] = df["portfolio_value"] - baseline
+    return df
+
+
+def render_equity_profit_chart(system_health_data: dict) -> None:
+    """Realtime-ish capital & profit chart for the Overview homepage."""
+    st.subheader("📈 实时资金与利润")
+    c1, c2, c3 = st.columns([2, 2, 2])
+    with c1:
+        window_label = st.selectbox(
+            "时间范围",
+            ["1 小时", "24 小时", "7 天"],
+            index=1,
+            key="equity_window",
+        )
+    with c2:
+        auto_refresh = st.checkbox("自动刷新 (30s)", value=False, key="equity_auto_refresh")
+    with c3:
+        st.caption("每次打开/刷新会写入资金快照（最少间隔 30 秒）")
+
+    hours = {"1 小时": 1.0, "24 小时": 24.0, "7 天": 24.0 * 7}[window_label]
+    snapshots = system_health_data.get("equity_snapshots") or []
+    df = _filter_equity_snapshots(snapshots, hours)
+
+    # Always include the live point so the chart isn't empty on first visit
+    live_portfolio = float(system_health_data.get("total_portfolio_value") or 0)
+    live_cash = float(system_health_data.get("available_cash") or 0)
+    live_pos = float(system_health_data.get("position_value") or 0)
+    live_realized = float(system_health_data.get("realized_pnl") or 0)
+    live_row = {
+        "ts": datetime.now(),
+        "portfolio_value": live_portfolio,
+        "cash_dollars": live_cash,
+        "position_value": live_pos,
+        "realized_pnl": live_realized,
+        "profit": 0.0,
+    }
+    if df.empty:
+        df = pd.DataFrame([live_row])
+    else:
+        # Recompute profit vs first point in window; append live if newer
+        if df["ts"].iloc[-1] < live_row["ts"] - timedelta(seconds=5):
+            df = pd.concat([df, pd.DataFrame([live_row])], ignore_index=True)
+        baseline = float(df["portfolio_value"].iloc[0])
+        df["profit"] = df["portfolio_value"] - baseline
+
+    latest = df.iloc[-1]
+    start = df.iloc[0]
+    profit_now = float(latest["portfolio_value"] - start["portfolio_value"])
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.metric("当前总权益", f"${float(latest['portfolio_value']):.2f}")
+    with m2:
+        st.metric("现金", f"${float(latest['cash_dollars']):.2f}")
+    with m3:
+        st.metric("持仓市值", f"${float(latest['position_value']):.2f}")
+    with m4:
+        st.metric(
+            f"区间盈亏 ({window_label})",
+            f"${profit_now:+.2f}",
+            delta=f"相对区间起点 ${float(start['portfolio_value']):.2f}",
+        )
+
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(
+        go.Scatter(
+            x=df["ts"],
+            y=df["portfolio_value"],
+            name="总权益 (Cash+持仓)",
+            mode="lines+markers",
+            line=dict(width=2, color="#2563eb"),
+            marker=dict(size=5),
+        ),
+        secondary_y=False,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df["ts"],
+            y=df["cash_dollars"],
+            name="现金",
+            mode="lines",
+            line=dict(width=1.5, color="#10b981", dash="dot"),
+        ),
+        secondary_y=False,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df["ts"],
+            y=df["position_value"],
+            name="持仓市值",
+            mode="lines",
+            line=dict(width=1.5, color="#f59e0b", dash="dot"),
+        ),
+        secondary_y=False,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df["ts"],
+            y=df["profit"],
+            name="区间盈亏",
+            mode="lines",
+            line=dict(width=2, color="#ef4444"),
+            fill="tozeroy",
+            fillcolor="rgba(239,68,68,0.08)",
+        ),
+        secondary_y=True,
+    )
+    fig.update_layout(
+        height=380,
+        margin=dict(l=20, r=20, t=30, b=20),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+        hovermode="x unified",
+        template="plotly_white",
+    )
+    fig.update_yaxes(title_text="资金 ($)", secondary_y=False)
+    fig.update_yaxes(title_text="盈亏 ($)", secondary_y=True)
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(
+        "盈亏 = 当前总权益 − 该时间窗口起点权益。充值会抬高权益曲线；"
+        f"已实现平仓盈亏合计（trade_logs）≈ ${live_realized:.2f}。"
+    )
+
+    if auto_refresh:
+        import time as _time
+        _time.sleep(30)
+        st.cache_data.clear()
+        st.rerun()
+
+
+def show_overview(performance_data, positions, system_health_data, open_orders=None):
     """Show overview dashboard."""
     
     st.header("📈 System Overview")
+    open_orders = open_orders or []
+
+    token = system_health_data.get("collateral_token", "pUSD")
+    deposit_addr = system_health_data.get("wallet_address", "?")
+    eoa_addr = system_health_data.get("eoa_address", "?")
+    pusd = float(system_health_data.get("pusd_dollars", system_health_data.get("available_cash", 0)) or 0)
+    usdc_e = float(system_health_data.get("usdc_e_dollars", 0) or 0)
+    trades = system_health_data.get("recent_trades") or []
+    deposits = system_health_data.get("recent_deposits") or []
+
+    st.subheader("🏦 Funding & Collateral")
+    f1, f2, f3, f4 = st.columns(4)
+    with f1:
+        st.metric(f"💵 {token} Cash", f"${pusd:.2f}", help="Spendable collateral on the deposit wallet")
+    with f2:
+        st.metric("🪙 USDC.e (legacy)", f"${usdc_e:.2f}", help="Should be ~0 after wrap to pUSD")
+    with f3:
+        st.metric(
+            "💰 Portfolio MTM",
+            f"${system_health_data['total_portfolio_value']:.2f}",
+            help="Cash + mark-to-market of open positions",
+        )
+    with f4:
+        st.metric(
+            "📊 Position Value",
+            f"${system_health_data['position_value']:.2f}",
+            help="Current market value of open positions",
+        )
+
+    render_equity_profit_chart(system_health_data)
+
+    st.markdown("**充值地址（Deposit / proxyWallet）** — pUSD 必须打到这里才能交易：")
+    if deposit_addr and deposit_addr != "?":
+        st.code(deposit_addr, language="text")
+        st.caption(
+            f"[PolygonScan 充值地址](https://polygonscan.com/address/{deposit_addr}) · "
+            f"[pUSD token](https://polygonscan.com/token/0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB?a={deposit_addr})"
+        )
+    if eoa_addr and eoa_addr != "?" and eoa_addr.lower() != str(deposit_addr).lower():
+        st.caption(f"Signer EOA（签名私钥地址，勿往这里充值交易资金）: `{eoa_addr}`")
+
+    st.markdown("**最近转入（链上 pUSD → deposit wallet）**")
+    if deposits:
+        dep_rows = []
+        for d in deposits:
+            txh = d.get("tx_hash") or ""
+            dep_rows.append(
+                {
+                    "金额 (pUSD)": round(float(d.get("amount_dollars", 0) or 0), 6),
+                    "From": d.get("from", ""),
+                    "Block": d.get("block_number", ""),
+                    "Tx Hash": txh,
+                    "PolygonScan": f"https://polygonscan.com/tx/{txh}" if txh else "",
+                }
+            )
+        st.dataframe(pd.DataFrame(dep_rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("暂未扫到近期 pUSD 转入（RPC 日志窗口有限，或尚无新充值）。")
+
+    st.markdown("**最近成交（CLOB fills + 交易哈希）**")
+    if trades:
+        trade_rows = []
+        for t in trades:
+            txh = t.get("tx_hash") or ""
+            trade_rows.append(
+                {
+                    "时间": t.get("when", ""),
+                    "Side": t.get("side", ""),
+                    "Outcome": t.get("outcome", ""),
+                    "Size": t.get("size", 0),
+                    "Price": t.get("price", 0),
+                    "Status": t.get("status", ""),
+                    "Market": t.get("market", ""),
+                    "Tx Hash": txh,
+                    "PolygonScan": f"https://polygonscan.com/tx/{txh}" if txh else "",
+                }
+            )
+        st.dataframe(pd.DataFrame(trade_rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("暂无成交记录（或 CLOB trades 拉取失败）。")
+
+    st.subheader("📌 持仓 · 止盈止损")
+    if positions:
+        pos_rows = []
+        for pos in positions:
+            cur = pos.get("current_price")
+            sl = pos.get("stop_loss_price")
+            tp = pos.get("take_profit_price")
+            pos_rows.append(
+                {
+                    "Strategy": pos.get("strategy") or "",
+                    "Side": pos.get("side") or "",
+                    "Qty": pos.get("quantity"),
+                    "Entry": pos.get("entry_price"),
+                    "Mark": cur if cur is not None else "—",
+                    "uPnL": pos.get("unrealized_pnl") if pos.get("unrealized_pnl") is not None else "—",
+                    "Stop Loss": sl if sl is not None else "—",
+                    "Take Profit": tp if tp is not None else "—",
+                    "距止损": pos.get("dist_to_sl") if pos.get("dist_to_sl") is not None else "—",
+                    "距止盈": pos.get("dist_to_tp") if pos.get("dist_to_tp") is not None else "—",
+                    "Max Hold(h)": pos.get("max_hold_hours") if pos.get("max_hold_hours") is not None else "—",
+                    "Market": (pos.get("market_id") or "")[:18] + "…",
+                    "Source": pos.get("source") or "",
+                }
+            )
+        st.dataframe(pd.DataFrame(pos_rows), use_container_width=True, hide_index=True)
+        missing_exits = sum(1 for p in positions if not p.get("stop_loss_price") and not p.get("take_profit_price"))
+        if missing_exits:
+            st.caption(f"⚠️ {missing_exits} 个持仓缺少 DB 止盈/止损（多为链上同步、未写入本地策略记录）。")
+    else:
+        st.info("暂无持仓。")
+
+    st.subheader("🧾 当前挂单（Open Orders）")
+    if open_orders:
+        st.dataframe(pd.DataFrame(open_orders), use_container_width=True, hide_index=True)
+    else:
+        st.info("当前没有挂单（或全部已成交/取消）。")
+
+    st.markdown("---")
     
     # Key metrics row
     col1, col2, col3, col4 = st.columns(4)
@@ -401,9 +833,9 @@ def show_overview(performance_data, positions, system_health_data):
     
     with col1b:
         st.metric(
-            label="💵 Available Cash",
+            label=f"💵 Available {token}",
             value=f"${system_health_data['available_cash']:.2f}",
-            help="Cash available for new trades"
+            help="Cash available for new trades (deposit wallet)"
         )
     
     with col2b:
@@ -417,29 +849,19 @@ def show_overview(performance_data, positions, system_health_data):
         total_trades = sum(stats.get('completed_trades', 0) for stats in performance_data.values()) if performance_data else 0
         st.metric(
             label="📈 Total Trades",
-            value=total_trades,
-            help="Total completed trades across all strategies"
+            value=total_trades if total_trades else len(trades),
+            help="DB completed trades; falls back to recent CLOB fills count"
         )
     
     with col3:
-        # Calculate both realized and unrealized P&L
         realized_pnl = sum(stats.get('total_pnl', 0) for stats in performance_data.values()) if performance_data else 0
-        
-        # Calculate unrealized P&L from current positions
-        unrealized_pnl = 0
+        unrealized_pnl = 0.0
         if positions:
-            # This is a rough estimate - in practice you'd get current market prices
             for pos in positions:
-                # Position is now a dictionary
-                if 'entry_price' in pos and 'quantity' in pos:
-                    # Estimate current value vs entry value
-                    # For demo purposes, we'll use a simple calculation
-                    position_value = pos['entry_price'] * pos['quantity']
-                    # Assume current value is similar to entry (this would be calculated with live prices)
-                    unrealized_pnl += 0  # Placeholder - would need current market prices
-        
+                up = pos.get("unrealized_pnl")
+                if isinstance(up, (int, float)):
+                    unrealized_pnl += up
         total_pnl = realized_pnl + unrealized_pnl
-        
         st.metric(
             label="💹 Total P&L",
             value=f"${total_pnl:.2f}",
@@ -455,7 +877,6 @@ def show_overview(performance_data, positions, system_health_data):
         )
     
     with col3b:
-        # Portfolio utilization
         if system_health_data['total_portfolio_value'] > 0:
             utilization_pct = (system_health_data['position_value'] / system_health_data['total_portfolio_value']) * 100
         else:
@@ -467,16 +888,10 @@ def show_overview(performance_data, positions, system_health_data):
         )
     
     with col4b:
-        # Cash utilization  
-        if system_health_data['available_cash'] > 0:
-            initial_cash = system_health_data['total_portfolio_value']  # Approximation
-            cash_used_pct = ((initial_cash - system_health_data['available_cash']) / initial_cash) * 100 if initial_cash > 0 else 0
-        else:
-            cash_used_pct = 100
         st.metric(
-            label="💸 Cash Deployed",
-            value=f"{min(100, max(0, cash_used_pct)):.1f}%", 
-            help="Percentage of original cash now in positions"
+            label="🧾 Open Orders",
+            value=len(open_orders),
+            help="Resting CLOB orders"
         )
     
     # Strategy performance summary
@@ -866,10 +1281,17 @@ def show_llm_analysis(llm_queries, llm_stats):
     else:
         st.info("No LLM queries found for the selected filters.")
 
-def show_positions_trades(positions):
-    """Show detailed positions and trades analysis."""
+def show_positions_trades(positions, open_orders=None):
+    """Show detailed positions, exit levels, and resting orders."""
     
     st.header("💼 Positions & Trades")
+    open_orders = open_orders or []
+
+    st.subheader(f"🧾 Open Orders ({len(open_orders)})")
+    if open_orders:
+        st.dataframe(pd.DataFrame(open_orders), use_container_width=True, hide_index=True)
+    else:
+        st.info("当前没有挂单。")
     
     if not positions:
         st.warning("No active positions found.")
@@ -881,24 +1303,36 @@ def show_positions_trades(positions):
     # Create positions DataFrame
     position_data = []
     for pos in positions:
-        # Convert timestamp string back to datetime for display
         try:
             timestamp = datetime.fromisoformat(pos['timestamp'])
             time_str = timestamp.strftime('%m/%d %H:%M')
-        except:
+        except Exception:
             time_str = 'Unknown'
+        cur = pos.get('current_price')
+        sl = pos.get('stop_loss_price')
+        tp = pos.get('take_profit_price')
+        entry = float(pos.get('entry_price') or 0)
+        qty = float(pos.get('quantity') or 0)
+        mark_val = (cur * qty) if isinstance(cur, (int, float)) else entry * qty
         
         position_data.append({
-            'Market ID': pos['market_id'],
-            'Strategy': pos['strategy'] or 'Unknown',
-            'Side': pos['side'],
-            'Quantity': pos['quantity'],
-            'Entry Price': f"${pos['entry_price']:.3f}",
-            'Position Value': f"${pos['quantity'] * pos['entry_price']:.2f}",
+            'ID': pos.get('id') or '—',
+            'Market ID': (pos.get('market_id') or '')[:22] + '…',
+            'Strategy': pos.get('strategy') or 'Unknown',
+            'Side': pos.get('side'),
+            'Qty': pos.get('quantity'),
+            'Entry': f"${entry:.3f}",
+            'Mark': f"${cur:.3f}" if isinstance(cur, (int, float)) else '—',
+            'Value': f"${mark_val:.2f}",
+            'uPnL': f"${pos['unrealized_pnl']:.3f}" if isinstance(pos.get('unrealized_pnl'), (int, float)) else '—',
+            'Stop Loss': f"${sl:.3f}" if sl else 'None',
+            'Take Profit': f"${tp:.3f}" if tp else 'None',
+            '距止损': f"{pos['dist_to_sl']:+.3f}" if isinstance(pos.get('dist_to_sl'), (int, float)) else '—',
+            '距止盈': f"{pos['dist_to_tp']:+.3f}" if isinstance(pos.get('dist_to_tp'), (int, float)) else '—',
+            'Max Hold(h)': pos.get('max_hold_hours') if pos.get('max_hold_hours') is not None else '—',
             'Entry Time': time_str,
-            'Status': pos['status'],
-            'Stop Loss': f"${pos['stop_loss_price']:.3f}" if pos['stop_loss_price'] else "None",
-            'Take Profit': f"${pos['take_profit_price']:.3f}" if pos['take_profit_price'] else "None"
+            'Status': pos.get('status'),
+            'Source': pos.get('source') or '',
         })
     
     df_positions = pd.DataFrame(position_data)
@@ -939,8 +1373,8 @@ def show_positions_trades(positions):
         
         with col1:
             # Value by strategy
-            strategy_values = filtered_df.groupby('Strategy')['Position Value'].apply(
-                lambda x: x.str.replace('$', '').astype(float).sum()
+            strategy_values = filtered_df.groupby('Strategy')['Value'].apply(
+                lambda x: x.str.replace('$', '', regex=False).astype(float).sum()
             )
             
             fig_strategy = px.pie(
@@ -961,6 +1395,9 @@ def show_positions_trades(positions):
                 labels={'x': 'Side', 'y': 'Count'}
             )
             st.plotly_chart(fig_sides, use_container_width=True)
+
+        with_exits = sum(1 for p in positions if p.get('stop_loss_price') or p.get('take_profit_price'))
+        st.caption(f"止盈/止损覆盖：{with_exits}/{len(positions)} 个持仓有本地 exit 计划（策略写入 DB）。")
 
 def show_risk_management(performance_data, positions, system_balance):
     """Show risk management dashboard."""
