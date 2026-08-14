@@ -417,27 +417,30 @@ class PolymarketClient(TradingLoggerMixin):
         """Return cached token IDs for a condition_id, or None if not seen."""
         return self._token_cache.get(condition_id)
 
+    async def _ensure_token_ids(self, condition_id: str) -> TokenIds:
+        """Return cached token ids, lazily resolving via Gamma when attached."""
+        ids = self._token_cache.get(condition_id)
+        if ids is not None:
+            return ids
+        if self._gamma is None:
+            raise UnknownMarketError(
+                f"No token_ids cached for condition_id={condition_id}. "
+                "Register the market or attach a GammaClient."
+            )
+        try:
+            yes_id, no_id = await self._gamma.get_token_ids(condition_id)
+        except Exception as exc:
+            raise UnknownMarketError(
+                f"Gamma lookup for condition_id={condition_id} failed: {exc}"
+            ) from exc
+        self.register_market(condition_id, yes_id, no_id)
+        return self._token_cache[condition_id]
+
     async def _resolve_token_id(self, condition_id: str, side: str) -> str:
         side_u = side.upper()
         if side_u not in ("YES", "NO"):
             raise ValueError(f"side must be 'YES' or 'NO', got {side!r}")
-
-        ids = self._token_cache.get(condition_id)
-        if ids is None and self._gamma is not None:
-            try:
-                yes_id, no_id = await self._gamma.get_token_ids(condition_id)
-            except Exception as exc:
-                raise UnknownMarketError(
-                    f"Gamma lookup for condition_id={condition_id} failed: {exc}"
-                ) from exc
-            self.register_market(condition_id, yes_id, no_id)
-            ids = self._token_cache[condition_id]
-
-        if ids is None:
-            raise UnknownMarketError(
-                f"No token_ids cached for condition_id={condition_id}. "
-                "Call register_market() first or attach a GammaClient."
-            )
+        ids = await self._ensure_token_ids(condition_id)
         return ids.yes if side_u == "YES" else ids.no
 
     # ------------------------------------------------------------------
@@ -639,16 +642,7 @@ class PolymarketClient(TradingLoggerMixin):
         rules, expiry) on top. Returns the same envelope shape as
         PolymarketClient.get_market: `{"market": {...}}`.
         """
-        ids = self._token_cache.get(condition_id)
-        if ids is None and self._gamma is not None:
-            yes_id, no_id = await self._gamma.get_token_ids(condition_id)
-            self.register_market(condition_id, yes_id, no_id)
-            ids = self._token_cache[condition_id]
-        if ids is None:
-            raise UnknownMarketError(
-                f"No token_ids cached for condition_id={condition_id}. "
-                "Register the market or attach a GammaClient."
-            )
+        ids = await self._ensure_token_ids(condition_id)
 
         # Fetch both books in parallel, then collapse into the canonical
         # legacy shape: best ask = lowest sell price on each side.
@@ -717,16 +711,7 @@ class PolymarketClient(TradingLoggerMixin):
         Polymarket convention so callers like `cli.py close-all` and
         `safe_compounder` keep working).
         """
-        ids = self._token_cache.get(condition_id)
-        if ids is None and self._gamma is not None:
-            yes_id, no_id = await self._gamma.get_token_ids(condition_id)
-            self.register_market(condition_id, yes_id, no_id)
-            ids = self._token_cache[condition_id]
-        if ids is None:
-            raise UnknownMarketError(
-                f"No token_ids cached for condition_id={condition_id}. "
-                "Register the market or attach a GammaClient."
-            )
+        ids = await self._ensure_token_ids(condition_id)
 
         yes_book, no_book = await asyncio.gather(
             self._fetch_book_one(ids.yes, depth=depth),

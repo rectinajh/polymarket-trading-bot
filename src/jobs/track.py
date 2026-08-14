@@ -15,6 +15,7 @@ from typing import Optional
 from src.utils.database import DatabaseManager, Position, TradeLog
 from src.config.settings import settings
 from src.utils.logging_setup import setup_logging, get_trading_logger
+from src.clients.gamma_client import GammaClient
 from src.clients.polymarket_client import PolymarketClient
 
 async def should_exit_position(
@@ -124,12 +125,16 @@ async def calculate_dynamic_exit_levels(position: Position) -> dict:
     
     return exit_levels
 
-async def run_tracking(db_manager: Optional[DatabaseManager] = None):
+async def run_tracking(
+    db_manager: Optional[DatabaseManager] = None,
+    polymarket_client: Optional[PolymarketClient] = None,
+):
     """
     Enhanced position tracking with smart exit strategies and sell limit orders.
     
     Args:
         db_manager: Optional DatabaseManager instance for testing.
+        polymarket_client: Optional shared client (with Gamma attached).
     """
     logger = get_trading_logger("position_tracking")
     live_mode = bool(settings.trading.live_trading_enabled)
@@ -142,7 +147,14 @@ async def run_tracking(db_manager: Optional[DatabaseManager] = None):
         db_manager = DatabaseManager()
         await db_manager.initialize()
 
-    polymarket_client = PolymarketClient()
+    owns_client = polymarket_client is None
+    gamma_client = None
+    if polymarket_client is None:
+        gamma_client = GammaClient()
+        polymarket_client = PolymarketClient(gamma_client=gamma_client)
+    elif getattr(polymarket_client, "_gamma", None) is None:
+        gamma_client = GammaClient()
+        polymarket_client.set_gamma_client(gamma_client)
 
     try:
         total_sell_orders = 0
@@ -324,7 +336,10 @@ async def run_tracking(db_manager: Optional[DatabaseManager] = None):
     except Exception as e:
         logger.error("Error in position tracking job.", error=str(e), exc_info=True)
     finally:
-        await polymarket_client.close()
+        if owns_client:
+            await polymarket_client.close()
+            if gamma_client is not None:
+                await gamma_client.close()
 
 if __name__ == "__main__":
     setup_logging()

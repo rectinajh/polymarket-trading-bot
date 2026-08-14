@@ -255,7 +255,7 @@ class GammaClient(TradingLoggerMixin):
         exclude_tag_ids_set = set(exclude_tag_ids or [])
 
         while page < MAX_PAGES and len(out) < max_results:
-            if offset > MAX_EVENTS_OFFSET:
+            if offset >= MAX_EVENTS_OFFSET:
                 self.logger.info(
                     "Gamma /events offset cap reached; stopping pagination",
                     offset=offset,
@@ -367,41 +367,51 @@ class GammaClient(TradingLoggerMixin):
         )
         return out
 
+    def _apply_derived(self, m: Dict[str, Any]) -> Dict[str, Any]:
+        """Attach `_token_ids` / `_condition_id` and cache YES/NO ids."""
+        derived = _derive_market_fields(m)
+        yes_id, no_id = derived["_token_ids"]
+        cond = derived["_condition_id"] or m.get("conditionId") or ""
+        if yes_id and no_id and cond:
+            self._token_cache[cond] = (yes_id, no_id)
+        m.update(derived)
+        return m
+
     async def get_market(self, condition_id: str) -> Dict[str, Any]:
         """Fetch a single market by `conditionId`. Returns the same shape as
         items in :meth:`get_markets` (with derived fields). Raises if not found.
+
+        Looks up Gamma with `condition_ids` (not a 500-row scan — that missed
+        most markets). Falls back to CLOB `GET /markets/{condition_id}`.
         """
-        # Gamma does not expose /markets/{conditionId} — must filter client-side.
-        # In practice we fetch the wider /markets list with a slug match where
-        # possible. Here we walk a small page and filter; for production, prefer
-        # caching token_ids at ingestion time and avoid re-lookups.
-        data = await self._request(
-            "GET",
-            f"{self.host}/markets",
-            params={"limit": 500, "active": "true", "closed": "false"},
-        )
-        if not isinstance(data, list):
-            raise GammaAPIError(f"unexpected /markets response type: {type(data).__name__}")
-        for m in data:
-            if m.get("conditionId") == condition_id:
-                derived = _derive_market_fields(m)
-                yes_id, no_id = derived["_token_ids"]
-                if yes_id and no_id:
-                    self._token_cache[condition_id] = (yes_id, no_id)
-                m.update(derived)
-                return m
-        # Fallback: try also-closed
-        data = await self._request(
-            "GET",
-            f"{self.host}/markets",
-            params={"limit": 500, "active": "false", "closed": "true"},
-        )
-        for m in data or []:
-            if m.get("conditionId") == condition_id:
-                derived = _derive_market_fields(m)
-                m.update(derived)
-                return m
-        raise GammaAPIError(f"market with conditionId={condition_id} not found")
+        for params in (
+            {"condition_ids": condition_id},
+            {"condition_id": condition_id},
+        ):
+            try:
+                data = await self._request(
+                    "GET", f"{self.host}/markets", params=params,
+                )
+            except GammaAPIError:
+                continue
+            markets = _as_market_list(data)
+            for m in markets:
+                if (m.get("conditionId") or "") == condition_id:
+                    return self._apply_derived(m)
+            if len(markets) == 1:
+                return self._apply_derived(markets[0])
+
+        try:
+            clob = await self._request(
+                "GET", f"{self.clob_host}/markets/{condition_id}",
+            )
+        except GammaAPIError as exc:
+            raise GammaAPIError(
+                f"market with conditionId={condition_id} not found"
+            ) from exc
+        if not isinstance(clob, dict):
+            raise GammaAPIError(f"market with conditionId={condition_id} not found")
+        return self._apply_derived(_clob_market_to_gamma(clob, condition_id))
 
     async def get_market_by_slug(self, slug: str) -> Dict[str, Any]:
         """Fetch a single market by its URL slug."""
@@ -463,7 +473,7 @@ class GammaClient(TradingLoggerMixin):
         tag_ids_set = set(tag_ids or [])
 
         while page < MAX_PAGES and len(out) < max_results:
-            if offset > MAX_EVENTS_OFFSET:
+            if offset >= MAX_EVENTS_OFFSET:
                 break
             params: Dict[str, Any] = {
                 "active":    str(active).lower(),
@@ -618,6 +628,61 @@ class GammaClient(TradingLoggerMixin):
 # --------------------------------------------------------------------------
 # Field-derivation helpers
 # --------------------------------------------------------------------------
+
+def _as_market_list(data: Any) -> List[Dict[str, Any]]:
+    """Normalize Gamma `/markets` payloads into a list of market dicts."""
+    if isinstance(data, list):
+        return [m for m in data if isinstance(m, dict)]
+    if isinstance(data, dict):
+        if data.get("conditionId") or data.get("clobTokenIds") or data.get("tokens"):
+            return [data]
+        inner = data.get("data") or data.get("markets") or []
+        if isinstance(inner, list):
+            return [m for m in inner if isinstance(m, dict)]
+    return []
+
+
+def _clob_market_to_gamma(clob: Dict[str, Any], condition_id: str) -> Dict[str, Any]:
+    """Translate a CLOB `/markets/{condition_id}` payload into Gamma-like keys
+    so `_derive_market_fields` can extract token ids."""
+    tokens = clob.get("tokens") or []
+    yes_id = no_id = ""
+    for t in tokens:
+        if not isinstance(t, dict):
+            continue
+        outcome = str(t.get("outcome") or "").lower()
+        tid = str(t.get("token_id") or "")
+        if outcome in ("yes", "y"):
+            yes_id = tid
+        elif outcome in ("no", "n"):
+            no_id = tid
+    if (not yes_id or not no_id) and len(tokens) >= 2:
+        yes_id = yes_id or str(tokens[0].get("token_id") or "")
+        no_id = no_id or str(tokens[1].get("token_id") or "")
+    tick = clob.get("minimum_tick_size") or clob.get("min_tick_size") or 0.01
+    try:
+        tick_f = float(tick or 0.01)
+    except (TypeError, ValueError):
+        tick_f = 0.01
+    try:
+        min_size = int(float(clob.get("minimum_order_size") or 0) or 0)
+    except (TypeError, ValueError):
+        min_size = 0
+    return {
+        "conditionId": clob.get("condition_id") or condition_id,
+        "question": clob.get("question") or "",
+        "description": clob.get("description") or "",
+        "clobTokenIds": json.dumps([yes_id, no_id]),
+        "negRisk": bool(clob.get("neg_risk", False)),
+        "orderPriceMinTickSize": tick_f,
+        "orderMinSize": min_size,
+        "active": bool(clob.get("active", True)),
+        "closed": bool(clob.get("closed", False)),
+        "enableOrderBook": True,
+        "acceptingOrders": not bool(clob.get("closed", False)),
+        "endDate": clob.get("end_date_iso") or clob.get("end_date") or "",
+    }
+
 
 def _derive_market_fields(m: Dict[str, Any]) -> Dict[str, Any]:
     """Pull computed convenience fields out of a raw Gamma market dict.

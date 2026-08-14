@@ -114,6 +114,34 @@ class TestTokenIdResolution(unittest.TestCase):
             self.assertEqual(c.get_token_ids("0xnew"), TokenIds(yes="Y", no="N"))
             gamma.get_token_ids.assert_called_once()
 
+    def test_get_market_resolves_via_gamma_without_preregister(self):
+        """The live bug: strategies call get_market(condition_id) on a client
+        that never went through ingest.register_market. Gamma must fill it in."""
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "cache.json"
+            c = PolymarketClient(private_key=DUMMY_PK, token_cache_path=cache)
+            gamma = MagicMock()
+            gamma.get_token_ids = AsyncMock(return_value=("yes_tok", "no_tok"))
+            gamma.get_market = AsyncMock(return_value={
+                "question": "Will X happen?",
+                "category": "politics",
+            })
+            c.set_gamma_client(gamma)
+
+            async def fake_book(token_id, depth=100):
+                book = MagicMock()
+                book.bids = []
+                book.asks = []
+                return book
+
+            c._fetch_book_one = fake_book
+            result = _run(c.get_market("0xdead"))
+            self.assertEqual(result["market"]["yes_token_id"], "yes_tok")
+            self.assertEqual(result["market"]["no_token_id"], "no_tok")
+            gamma.get_token_ids.assert_called_once_with("0xdead")
+
     def test_invalid_side_raises_value_error(self):
         c = PolymarketClient(private_key=DUMMY_PK)
         c.register_market("0xabc", "Y", "N")

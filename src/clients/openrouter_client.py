@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from json_repair import repair_json
 from openai import AsyncOpenAI
+import httpx
 
 from src.clients.xai_client import (
     TradingDecision,
@@ -148,12 +149,17 @@ class OpenRouterClient(TradingLoggerMixin):
                 "Set MOONSHOT_API_KEY (Kimi) or OPENROUTER_API_KEY."
             )
 
-        # OpenAI-compatible async client (OpenRouter or Moonshot/Kimi)
+        # OpenAI-compatible async client (OpenRouter or Moonshot/Kimi).
+        # httpx 0.28 dropped `proxies=`; openai 1.51 still passes it when it
+        # builds the default session, which raises TypeError and leaves the
+        # LLM path dead. Supplying our own AsyncClient avoids that.
+        http_client = httpx.AsyncClient(timeout=120.0)
         self.client = AsyncOpenAI(
             api_key=self.api_key or "missing",
             base_url=self.base_url,
             timeout=120.0,
             max_retries=0,  # We handle retries ourselves
+            http_client=http_client,
         )
 
         # Default generation parameters

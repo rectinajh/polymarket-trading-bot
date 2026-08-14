@@ -64,12 +64,15 @@ class OpenAIClient(TradingLoggerMixin):
         self.api_key = api_key or settings.api.openai_api_key
         self.base_url = settings.api.openai_base_url
         
-        # Initialize OpenAI client
+        # Initialize OpenAI client. Pass our own httpx session so openai 1.51
+        # does not call AsyncClient(proxies=...) which httpx>=0.28 rejects.
+        http_client = httpx.AsyncClient(timeout=60.0)
         self.client = AsyncOpenAI(
             api_key=self.api_key,
             base_url=self.base_url,
             timeout=60.0,
-            max_retries=3
+            max_retries=3,
+            http_client=http_client,
         )
 
         # Model configuration

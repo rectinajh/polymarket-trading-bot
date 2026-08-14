@@ -32,10 +32,15 @@ class TestOpenRouterClient:
         with patch("src.clients.openrouter_client.settings") as mock_settings:
             mock_settings.api.openrouter_api_key = "test-key"
             mock_settings.api.openrouter_base_url = "https://openrouter.ai/api/v1"
+            mock_settings.api.llm_provider = "openrouter"
             mock_settings.trading.daily_ai_cost_limit = 50.0
+            mock_settings.trading.primary_model = "anthropic/claude-sonnet-4.5"
+            mock_settings.trading.ai_temperature = 0.3
+            mock_settings.trading.ai_max_tokens = 800
             client = OpenRouterClient()
             assert client.total_cost == 0.0
             assert client.request_count == 0
+            assert client.client is not None
 
     def test_parse_trading_decision_valid_json(self):
         """Test parsing a valid JSON trading decision."""

@@ -105,13 +105,14 @@ async def process_and_queue_markets(
         yes_tok = m.get("yes_token_id")
         no_tok = m.get("no_token_id")
         if polymarket_client is not None and yes_tok and no_tok:
-            polymarket_client.register_market(
-                ticker,
-                yes_tok,
-                no_tok,
+            routing = dict(
                 neg_risk=bool(m.get("neg_risk", False)),
                 tick_size=float(m.get("min_tick_size", 0.01) or 0.01),
             )
+            polymarket_client.register_market(ticker, yes_tok, no_tok, **routing)
+            cond = m.get("condition_id") or ""
+            if cond and cond != ticker:
+                polymarket_client.register_market(cond, yes_tok, no_tok, **routing)
 
     if not markets_to_upsert:
         logger.info("No new markets to upsert in this batch.")

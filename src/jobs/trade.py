@@ -20,6 +20,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 
+from src.clients.gamma_client import GammaClient
 from src.clients.polymarket_client import PolymarketClient
 from src.clients.xai_client import XAIClient
 from src.utils.database import DatabaseManager
@@ -38,7 +39,11 @@ from src.jobs.decide import make_decision_for_market
 from src.jobs.execute import execute_position
 
 
-async def run_trading_job() -> Optional[TradingSystemResults]:
+async def run_trading_job(
+    db_manager: Optional[DatabaseManager] = None,
+    polymarket_client: Optional[PolymarketClient] = None,
+    xai_client: Optional[XAIClient] = None,
+) -> Optional[TradingSystemResults]:
     """
     Enhanced trading job using the Unified Advanced Trading System.
     
@@ -51,16 +56,31 @@ async def run_trading_job() -> Optional[TradingSystemResults]:
     3. Advanced portfolio optimization with Kelly Criterion
     4. Dynamic exit strategies and risk management
     5. Real-time performance monitoring
+
+    When callers (Beast Mode) pass an already-wired PolymarketClient with
+    Gamma attached, that instance is reused so token_id registration from
+    ingestion is visible to get_market / place_order.
     """
     logger = get_trading_logger("trading_job")
+    owns_clients = polymarket_client is None
+    gamma_client: Optional[GammaClient] = None
+    owns_xai = xai_client is None
     
     try:
         logger.info("🚀 Starting Enhanced Trading Job - Beast Mode Activated!")
         
-        # Initialize clients
-        db_manager = DatabaseManager()
-        polymarket_client = PolymarketClient()
-        xai_client = XAIClient(db_manager=db_manager)  # Pass db_manager for LLM logging
+        if db_manager is None:
+            db_manager = DatabaseManager()
+        if polymarket_client is None:
+            gamma_client = GammaClient()
+            polymarket_client = PolymarketClient(gamma_client=gamma_client)
+        elif getattr(polymarket_client, "_gamma", None) is None:
+            # Shared client from an older caller that forgot Gamma — attach
+            # one so token resolution does not fail with UnknownMarketError.
+            gamma_client = GammaClient()
+            polymarket_client.set_gamma_client(gamma_client)
+        if xai_client is None:
+            xai_client = XAIClient(db_manager=db_manager)
         
         # Configure the unified system
         # Use default settings unless overridden
@@ -121,22 +141,43 @@ async def run_trading_job() -> Optional[TradingSystemResults]:
         logger.error(f"Error in enhanced trading job: {e}")
         # Fallback to legacy system if unified system fails
         logger.warning("🔄 Falling back to legacy decision-making system")
-        return await _fallback_legacy_trading()
+        return await _fallback_legacy_trading(
+            db_manager=db_manager,
+            polymarket_client=polymarket_client,
+            xai_client=xai_client,
+        )
+    finally:
+        if owns_clients:
+            if polymarket_client is not None:
+                await polymarket_client.close()
+            if gamma_client is not None:
+                await gamma_client.close()
+        if owns_xai and xai_client is not None:
+            await xai_client.close()
 
 
-async def _fallback_legacy_trading() -> Optional[TradingSystemResults]:
+async def _fallback_legacy_trading(
+    db_manager: Optional[DatabaseManager] = None,
+    polymarket_client: Optional[PolymarketClient] = None,
+    xai_client: Optional[XAIClient] = None,
+) -> Optional[TradingSystemResults]:
     """
     Fallback to the original sequential decision-making if unified system fails.
     """
     logger = get_trading_logger("trading_job_fallback")
+    owns_clients = polymarket_client is None
+    gamma_client: Optional[GammaClient] = None
     
     try:
         logger.info("🔄 Executing fallback legacy trading system")
         
-        # Initialize components
-        db_manager = DatabaseManager()
-        polymarket_client = PolymarketClient()
-        xai_client = XAIClient()
+        if db_manager is None:
+            db_manager = DatabaseManager()
+        if polymarket_client is None:
+            gamma_client = GammaClient()
+            polymarket_client = PolymarketClient(gamma_client=gamma_client)
+        if xai_client is None:
+            xai_client = XAIClient(db_manager=db_manager)
         
         # Get eligible markets
         markets = await db_manager.get_eligible_markets(
@@ -182,6 +223,12 @@ async def _fallback_legacy_trading() -> Optional[TradingSystemResults]:
     except Exception as e:
         logger.error(f"Error in fallback trading system: {e}")
         return TradingSystemResults()
+    finally:
+        if owns_clients:
+            if polymarket_client is not None:
+                await polymarket_client.close()
+            if gamma_client is not None:
+                await gamma_client.close()
 
 
 # For backwards compatibility

@@ -36,6 +36,7 @@ from src.jobs.evaluate import run_evaluation
 from src.utils.logging_setup import setup_logging, get_trading_logger
 from src.utils.database import DatabaseManager
 from src.clients.polymarket_client import PolymarketClient
+from src.clients.gamma_client import GammaClient
 from src.clients.xai_client import XAIClient
 from src.config.settings import settings
 
@@ -112,8 +113,11 @@ class BeastModeBot:
             await self._ensure_database_ready(db_manager)
             self.logger.info("✅ Database initialization complete!")
             
-            # Initialize other components
-            polymarket_client = PolymarketClient()
+            # Initialize other components. Gamma must be attached so
+            # get_market / get_orderbook can resolve YES/NO token ids for
+            # markets that were not pre-registered during ingestion.
+            gamma_client = GammaClient()
+            polymarket_client = PolymarketClient(gamma_client=gamma_client)
 
             # LLM client — single-model with OpenRouter fallback chain. The
             # XAIClient name is historical; it routes through OpenRouter,
@@ -128,7 +132,9 @@ class BeastModeBot:
             # Run initial ingestion synchronously so trading cycles have data
             self.logger.info("📥 Running initial market ingestion (this may take 1-2 minutes)...")
             market_queue = asyncio.Queue()
-            await run_ingestion(db_manager, market_queue)
+            await run_ingestion(
+                db_manager, market_queue, polymarket_client=polymarket_client
+            )
             self.logger.info("✅ Initial market ingestion complete. Starting trading cycles.")
             
             # Then start background refresh loop
@@ -181,6 +187,7 @@ class BeastModeBot:
 
             await self.xai_client.close()
             await polymarket_client.close()
+            await gamma_client.close()
             
             self.logger.info("🏁 Beast Mode Bot shut down gracefully")
             
@@ -213,7 +220,9 @@ class BeastModeBot:
                 # Create a queue for market ingestion (though we're not using it in Beast Mode)
                 market_queue = asyncio.Queue()
                 # ✅ FIXED: Pass the shared database manager
-                await run_ingestion(db_manager, market_queue)
+                await run_ingestion(
+                    db_manager, market_queue, polymarket_client=polymarket_client
+                )
                 await asyncio.sleep(300)  # Run every 5 minutes (much slower to prevent 429s)
             except Exception as e:
                 self.logger.error(f"Error in market ingestion: {e}")
@@ -235,7 +244,11 @@ class BeastModeBot:
                 self.logger.info(f"🔄 Starting Beast Mode Trading Cycle #{cycle_count}")
                 
                 # Run the Beast Mode unified trading system
-                results = await run_trading_job()
+                results = await run_trading_job(
+                    db_manager=db_manager,
+                    polymarket_client=polymarket_client,
+                    xai_client=self.xai_client,
+                )
                 
                 if results and results.total_positions > 0:
                     self.logger.info(
@@ -317,7 +330,7 @@ class BeastModeBot:
         while not self.shutdown_event.is_set():
             try:
                 # ✅ FIXED: Pass the shared database manager
-                await run_tracking(db_manager)
+                await run_tracking(db_manager, polymarket_client=polymarket_client)
                 await asyncio.sleep(120)  # Check positions every 2 minutes (slower to reduce API load)
             except Exception as e:
                 self.logger.error(f"Error in position tracking: {e}")
