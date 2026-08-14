@@ -295,13 +295,18 @@ class UnifiedAdvancedTradingSystem:
         Execute market making strategy for spread profits.
         """
         try:
-            # Cap the universe — scanning 600 markets means 1200 CLOB book
-            # fetches per cycle and trips rate limits. Directional already
-            # takes the top names; MM only needs a handful of liquid books.
+            # Prefer mid-price markets so MM does not burn rate-limit budget
+            # on settled / empty books ranked only by lifetime volume.
+            def _mm_rank(m):
+                yp = float(getattr(m, "yes_price", 0) or 0)
+                yp_d = yp / 100.0 if yp > 1.5 else yp
+                mid = 1.0 - abs(yp_d - 0.5) * 2.0 if yp_d else 0.0
+                if yp_d and (yp_d < 0.08 or yp_d > 0.92):
+                    mid = -1.0
+                return (mid, getattr(m, "volume", 0) or 0)
+
             mm_limit = 12
-            mm_markets = sorted(
-                markets, key=lambda m: getattr(m, "volume", 0) or 0, reverse=True
-            )[:mm_limit]
+            mm_markets = sorted(markets, key=_mm_rank, reverse=True)[:mm_limit]
             self.logger.info(
                 f"🎯 Executing Market Making Strategy on {len(mm_markets)} "
                 f"markets (of {len(markets)})"

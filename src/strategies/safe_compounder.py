@@ -417,7 +417,7 @@ class SafeCompounder:
             archived=False,
             accepting_orders=True,
             exclude_tag_ids=list(self._skip_tag_ids) or None,
-            order="volume",
+            order="volume24hr",
             ascending=False,
             max_results=2000,
         )

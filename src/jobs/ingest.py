@@ -204,7 +204,7 @@ async def run_ingestion(
             max_time_to_expiry_days=getattr(settings.trading, "max_time_to_expiry_days", None),
             tag_ids=tag_ids or None,
             exclude_tag_ids=exclude_tag_ids or None,
-            order="volume",
+            order="volume24hr",
             ascending=False,
             max_results=2000,
         )

@@ -133,7 +133,27 @@ async def execute_position(
                 )
                 return False
             order_response = await polymarket_client.place_order(**order_params)
-            
+
+            # Only mark filled when CLOB returns a usable order id / success.
+            order_id = None
+            if isinstance(order_response, dict):
+                order_obj = order_response.get("order") or {}
+                if isinstance(order_obj, dict):
+                    order_id = order_obj.get("order_id") or order_obj.get("id")
+                order_id = (
+                    order_id
+                    or order_response.get("orderID")
+                    or order_response.get("order_id")
+                    or order_response.get("id")
+                )
+                success_flag = order_response.get("success")
+                if success_flag is False or not order_id:
+                    logger.error(
+                        f"❌ LIVE order response missing success/order id for "
+                        f"{position.market_id}: {order_response}"
+                    )
+                    return False
+
             # For a market order, the fill price is not guaranteed.
             # A more robust implementation would query the /fills endpoint
             # to confirm the execution price after the fact.
@@ -141,19 +161,19 @@ async def execute_position(
             fill_price = position.entry_price
 
             await db_manager.mark_position_filled(position.id, fill_price, live=True)
-            logger.info(f"✅ LIVE ORDER PLACED for {position.market_id}. Order ID: {order_response.get('order', {}).get('order_id')}")
+            logger.info(f"✅ LIVE ORDER PLACED for {position.market_id}. Order ID: {order_id}")
             logger.info(f"💰 Real money used: ${position.quantity * fill_price:.2f}")
             return True
 
         except GeoblockError as e:
             logger.error(
                 f"❌ GEOBLOCK: live buys are not allowed from this IP. {e} "
-                "Disabling live trading for this process; switch to a "
-                "Polymarket-allowed region to open new orders."
+                "Halting live order placement for this process. "
+                "Will NOT silently fall back to paper mode."
             )
             settings.trading.live_trading_enabled = False
-            settings.trading.paper_trading_mode = True
-            return False
+            # Do not flip into paper simulation during a --live run.
+            raise
         except PolymarketAPIError as e:
             logger.error(f"❌ FAILED to place LIVE order for {position.market_id}: {e}")
             return False

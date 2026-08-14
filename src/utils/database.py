@@ -421,7 +421,9 @@ class DatabaseManager(TradingLoggerMixin):
                     expiration_ts > ? AND
                     expiration_ts <= ? AND
                     status = 'active' AND
-                    has_position = 0
+                    has_position = 0 AND
+                    yes_price >= 0.08 AND
+                    yes_price <= 0.92
             """, (volume_min, now_ts, max_expiry_ts))
             rows = await cursor.fetchall()
             
@@ -1005,12 +1007,17 @@ class DatabaseManager(TradingLoggerMixin):
             self.logger.info(f"Added position for market {position.market_id}", position_id=cursor.lastrowid)
             return cursor.lastrowid
 
-    async def get_open_positions(self) -> List[Position]:
-        """Get all open positions."""
+    async def get_open_positions(self, live_only: bool = False) -> List[Position]:
+        """Get open positions. If live_only=True, exclude paper fills."""
         async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                "SELECT * FROM positions WHERE status = 'open'"
-            )
+            if live_only:
+                cursor = await db.execute(
+                    "SELECT * FROM positions WHERE status = 'open' AND live = 1"
+                )
+            else:
+                cursor = await db.execute(
+                    "SELECT * FROM positions WHERE status = 'open'"
+                )
             rows = await cursor.fetchall()
             
             positions = []
@@ -1035,6 +1042,19 @@ class DatabaseManager(TradingLoggerMixin):
                 positions.append(position)
             
             return positions
+
+    async def archive_paper_open_positions(self) -> int:
+        """Close leftover paper open positions so they cannot pollute live limits."""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "UPDATE positions SET status = 'closed' "
+                "WHERE status = 'open' AND live = 0"
+            )
+            await db.commit()
+            closed = cursor.rowcount or 0
+            if closed:
+                self.logger.info(f"Archived {closed} paper open positions")
+            return closed
 
 if __name__ == "__main__":
     import asyncio

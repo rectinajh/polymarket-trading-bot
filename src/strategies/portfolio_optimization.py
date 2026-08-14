@@ -828,23 +828,43 @@ async def create_market_opportunities_from_markets(
     logger = get_trading_logger("portfolio_opportunities")
     opportunities = []
     
-    # Lifetime volume often ranks resolved / unlisted tokens first. Scan a
-    # wider set, keep only markets that currently have a two-sided book, then
-    # spend the AI budget on those.
+    # Prefer mid-price liquid markets. Lifetime volume alone ranks many
+    # resolved / near-settled names first (empty CLOB books → 404 noise).
     max_markets_to_analyze = 10
-    scan_limit = min(len(markets), 40)
-    ranked = sorted(markets, key=lambda m: getattr(m, "volume", 0) or 0, reverse=True)[:scan_limit]
+    scan_limit = min(len(markets), 80)
+
+    def _rank_key(m: Market):
+        # yes_price in DB is cents (0–100). Prefer 15–85¢ and higher volume.
+        yp = float(getattr(m, "yes_price", 0) or 0)
+        if yp > 1.5:  # stored as cents
+            yp_dollar = yp / 100.0
+        else:
+            yp_dollar = yp
+        mid_score = 1.0 - abs(yp_dollar - 0.5) * 2.0  # 1.0 at 50¢, 0 at 0/100
+        if yp_dollar < 0.08 or yp_dollar > 0.92:
+            mid_score = -1.0  # deprioritize extremes
+        return (mid_score, getattr(m, "volume", 0) or 0)
+
+    ranked = sorted(markets, key=_rank_key, reverse=True)[:scan_limit]
     logger.info(
-        f"Scanning {len(ranked)} markets by volume for up to "
+        f"Scanning {len(ranked)} markets (mid-price + volume) for up to "
         f"{max_markets_to_analyze} tradeable books"
     )
     
     analyzed = 0
     skipped_no_book = 0
+    skipped_extreme = 0
     for market in ranked:
         if analyzed >= max_markets_to_analyze:
             break
         try:
+            # Cheap DB pre-filter before any CLOB round-trip
+            yp = float(getattr(market, "yes_price", 0) or 0)
+            yp_dollar = yp / 100.0 if yp > 1.5 else yp
+            if yp_dollar and (yp_dollar < 0.08 or yp_dollar > 0.92):
+                skipped_extreme += 1
+                continue
+
             market_data = await polymarket_client.get_market(market.market_id)
             if not market_data:
                 skipped_no_book += 1
@@ -859,7 +879,8 @@ async def create_market_opportunities_from_markets(
             market_prob = yes_ask if 0 < yes_ask <= 1 else (market_info.get('yes_price', 50) / 100)
             
             # Skip markets with extreme prices (too risky for portfolio)
-            if market_prob < 0.05 or market_prob > 0.95:
+            if market_prob < 0.08 or market_prob > 0.92:
+                skipped_extreme += 1
                 continue
 
             analyzed += 1
@@ -927,12 +948,18 @@ async def create_market_opportunities_from_markets(
                 logger.info(f"❌ EDGE FILTERED: {market.market_id} - {edge_result.reason}")
             
         except Exception as e:
-            logger.error(f"Error creating opportunity from {market.market_id}: {e}")
+            msg = str(e).lower()
+            if "no orderbook" in msg or "404" in msg or "request exception" in msg:
+                skipped_no_book += 1
+                logger.debug(f"Skipping {market.market_id}: no live book ({e})")
+            else:
+                logger.error(f"Error creating opportunity from {market.market_id}: {e}")
             continue
     
     logger.info(
         f"Created {len(opportunities)} opportunities from {analyzed} "
-        f"tradeable markets (scanned {len(ranked)}, skipped_no_book={skipped_no_book})"
+        f"tradeable markets (scanned {len(ranked)}, skipped_no_book={skipped_no_book}, "
+        f"skipped_extreme={skipped_extreme})"
     )
     return opportunities
 
@@ -969,7 +996,7 @@ async def _evaluate_immediate_trade(
         strong_opportunity = (
             should_trade and
             edge_result.edge_percentage >= 0.10 and  # DECREASED: 10% edge for immediate execution (was 18%)
-            opportunity.confidence >= 0.60 and       # DECREASED: 60% confidence (was 75%)
+            opportunity.confidence >= 0.50 and       # Align with settings.min_confidence_to_trade
             opportunity.expected_return >= 0.05      # DECREASED: 5% expected return (was 8%)
         )
         

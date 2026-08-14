@@ -58,8 +58,8 @@ dependencies = [
     "sentry-sdk==1.39.2",
     "uvicorn",
     "json-repair",
-    # --- Polymarket (CLOB + on-chain) ---
-    "py-clob-client>=0.17.0",
+    # --- Polymarket (CLOB V2 + on-chain) ---
+    "py-clob-client-v2>=1.0.0",
     "web3>=6.15.0",
     "eth-account>=0.11.0",
 ]

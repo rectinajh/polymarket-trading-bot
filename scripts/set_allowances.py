@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-One-time USDC + CTF allowance provisioner for the Polymarket trading wallet.
+One-time pUSD + CTF allowance provisioner for the Polymarket trading wallet.
 
-Polymarket's CLOB matches orders against three on-chain contracts:
-  - CTF Exchange       (legacy)
-  - Neg-Risk Exchange  (newer markets)
-  - Neg-Risk Adapter   (used by both)
+CLOB V2 matches orders against:
+  - CTF Exchange V2
+  - Neg-Risk Exchange V2
+  - Neg-Risk Adapter
 
 For each, the funding wallet must:
-  1. `approve(spender, MAX)` on USDC.e (so the contract can pull funds)
+  1. `approve(spender, MAX)` on pUSD (CLOB V2 collateral)
   2. `setApprovalForAll(spender, true)` on the Conditional-Tokens ERC1155
      (so the contract can move your YES/NO shares when you sell)
 
@@ -38,6 +38,8 @@ from dotenv import load_dotenv  # noqa: E402
 
 from src.clients.polymarket_client import (  # noqa: E402
     POLYMARKET_SPENDERS,
+    COLLATERAL_TOKEN_POLYGON,
+    PUSD_POLYGON,
     USDC_E_POLYGON,
     DEFAULT_RPC_URL,
     ALLOWANCE_OK_THRESHOLD,
@@ -158,7 +160,7 @@ def main() -> int:
     w3 = _build_w3(rpc_url)
 
     usdc = w3.eth.contract(
-        address=w3.to_checksum_address(USDC_E_POLYGON),
+        address=w3.to_checksum_address(COLLATERAL_TOKEN_POLYGON),
         abi=ERC20_APPROVE_ABI,
     )
     ctf = w3.eth.contract(

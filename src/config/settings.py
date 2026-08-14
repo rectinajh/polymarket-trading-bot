@@ -9,8 +9,8 @@ from dataclasses import dataclass, field
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+# Load environment variables (.env must win over stale PM2 dumped env)
+load_dotenv(override=True)
 
 
 def _env_flag(name: str, default: str = "false") -> bool:
@@ -180,7 +180,7 @@ class APIConfig:
         )
     )
     polymarket_chain_id: int = field(default_factory=lambda: int(os.getenv("POLYMARKET_CHAIN_ID", "137")))
-    polymarket_signature_type: int = field(default_factory=lambda: int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0")))
+    polymarket_signature_type: int = field(default_factory=lambda: int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "3")))
     polymarket_gamma_host: str = field(
         default_factory=lambda: _validated_env_url(
             "POLYMARKET_GAMMA_HOST", "https://gamma-api.polymarket.com", "POLYMARKET_GAMMA_HOST"
@@ -256,9 +256,7 @@ class TradingConfig:
     max_time_to_expiry_days: int = 14   # SANE: Shorter timeframes (was 30)
     
     # AI decision making — DATA-DRIVEN THRESHOLDS  
-    min_confidence_to_trade: float = 0.45   # LOOSENED: 45% confidence minimum (was 60%, approved 2026-03-29)
-                                           # Based on analysis: 65% was too conservative, bot finding 0 eligible markets
-                                           # NCAAB NO-side showed 74% WR at +10% ROI, suggesting value at lower thresholds
+    min_confidence_to_trade: float = 0.50   # Balanced live threshold (was 60% too strict / 45% too loose)
     
     # Category-specific confidence adjustments (applied as multipliers to base threshold)
     category_confidence_adjustments: Dict[str, float] = field(default_factory=lambda: {
@@ -308,7 +306,7 @@ class TradingConfig:
 
     # AI trading criteria - MORE PERMISSIVE
     max_analysis_cost_per_decision: float = 0.15  # INCREASED: Allow higher cost per decision (was 0.10, now 0.15)
-    min_confidence_threshold: float = 0.45  # DECREASED: Lower confidence threshold (was 0.55, now 0.45)
+    min_confidence_threshold: float = 0.50  # Align with min_confidence_to_trade
 
     # Cost control and market analysis frequency - MORE PERMISSIVE
     daily_ai_budget: float = 10.0  # INCREASED: Higher daily budget (was 5.0, now 10.0)

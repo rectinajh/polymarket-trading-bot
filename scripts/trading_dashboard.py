@@ -20,14 +20,24 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import sys
 import os
+import re
+from pathlib import Path
 from datetime import datetime, timedelta
 import json
 
 # Add parent directory to path for imports
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.append(str(PROJECT_ROOT))
+
+from dotenv import load_dotenv
+load_dotenv(PROJECT_ROOT / ".env")
 
 from src.utils.database import DatabaseManager
 from src.clients import build_polymarket_clients
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_DEFAULT_LOG_PATH = PROJECT_ROOT / "logs" / "latest.log"
+
 
 # Configure Streamlit page
 st.set_page_config(
@@ -69,8 +79,57 @@ st.markdown("""
         padding: 1rem;
         margin: 0.5rem 0;
     }
+
+    .log-panel {
+        background: #0f172a;
+        color: #e2e8f0;
+        border-radius: 0.5rem;
+        padding: 1rem;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 0.78rem;
+        line-height: 1.45;
+        max-height: 520px;
+        overflow-y: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+    }
 </style>
 """, unsafe_allow_html=True)
+
+
+def _resolve_log_path() -> Path:
+    """Prefer logs/latest.log, fall back to newest trading_system_*.log."""
+    if _DEFAULT_LOG_PATH.exists():
+        return _DEFAULT_LOG_PATH
+    logs_dir = PROJECT_ROOT / "logs"
+    if not logs_dir.exists():
+        return _DEFAULT_LOG_PATH
+    candidates = sorted(
+        logs_dir.glob("trading_system_*.log"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return candidates[0] if candidates else _DEFAULT_LOG_PATH
+
+
+def read_latest_logs(lines: int = 200, level_filter: str = "ALL") -> tuple[str, Path, int]:
+    """Read the last N lines from the bot log file (ANSI stripped)."""
+    path = _resolve_log_path()
+    if not path.exists():
+        return f"(log file not found: {path})", path, 0
+
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            raw_lines = f.readlines()
+    except OSError as exc:
+        return f"(failed to read log: {exc})", path, 0
+
+    cleaned = [_ANSI_RE.sub("", line.rstrip("\n")) for line in raw_lines]
+    if level_filter and level_filter != "ALL":
+        token = f" {level_filter} "
+        cleaned = [line for line in cleaned if token in line or f"[{level_filter.lower()}" in line.lower()]
+    selected = cleaned[-lines:] if lines > 0 else cleaned
+    return "\n".join(selected) if selected else "(no matching log lines)", path, len(cleaned)
 
 # @st.cache_data(ttl=60)  # Cache for 1 minute - temporarily disabled
 def load_performance_data():
@@ -267,6 +326,7 @@ def main():
         "Select View",
         [
             "📈 Overview",
+            "📋 Live Logs",
             "🎯 Strategy Performance",
             "🤖 LLM Analysis",
             "💼 Positions & Trades",
@@ -308,6 +368,8 @@ def main():
     # Page routing
     if page == "📈 Overview":
         show_overview(performance_data, positions, system_health_data)
+    elif page == "📋 Live Logs":
+        show_live_logs()
     elif page == "🎯 Strategy Performance":
         show_strategy_performance(performance_data)
     elif page == "🤖 LLM Analysis":
@@ -494,6 +556,59 @@ def show_overview(performance_data, positions, system_health_data):
             st.dataframe(df, use_container_width=True, hide_index=True)
     else:
         st.info("No active positions currently.")
+
+    # Compact latest-logs panel on Overview
+    st.subheader("📋 Latest Bot Logs")
+    log_text, log_path, total_lines = read_latest_logs(lines=40, level_filter="ALL")
+    st.caption(f"{log_path} · {total_lines} lines total · open **Live Logs** for more")
+    safe = (
+        log_text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+    st.markdown(f'<div class="log-panel">{safe}</div>', unsafe_allow_html=True)
+
+
+def show_live_logs():
+    """Dedicated log viewer for the running trading bot."""
+    st.header("📋 Live Logs")
+    st.caption("Reads `logs/latest.log` from the bot process. Refresh to pull the newest lines.")
+
+    c1, c2, c3, c4 = st.columns([1.2, 1.2, 1, 1])
+    with c1:
+        line_count = st.selectbox("Lines", [50, 100, 200, 400, 800], index=2)
+    with c2:
+        level = st.selectbox("Level", ["ALL", "ERROR", "WARNING", "INFO", "DEBUG"], index=0)
+    with c3:
+        auto_refresh = st.checkbox("Auto refresh (10s)", value=False)
+    with c4:
+        if st.button("🔄 Refresh logs", use_container_width=True):
+            st.rerun()
+
+    log_text, log_path, total_lines = read_latest_logs(lines=int(line_count), level_filter=level)
+    mtime = ""
+    if log_path.exists():
+        mtime = datetime.fromtimestamp(log_path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+
+    meta1, meta2, meta3 = st.columns(3)
+    meta1.metric("Log file", log_path.name)
+    meta2.metric("Total lines", total_lines)
+    meta3.metric("Last modified", mtime or "—")
+
+    # Escape HTML entities so log content cannot break the panel.
+    safe = (
+        log_text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+    st.markdown(f'<div class="log-panel">{safe}</div>', unsafe_allow_html=True)
+
+    if auto_refresh:
+        import time
+
+        time.sleep(10)
+        st.rerun()
+
 
 def show_strategy_performance(performance_data):
     """Show detailed strategy performance analysis."""

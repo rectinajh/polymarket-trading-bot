@@ -1,9 +1,9 @@
 """
 Polymarket CLOB client — exchange-layer adapter for the trading bot.
 
-Wraps `py-clob-client` (synchronous) in an async interface that mirrors the
-public shape of the legacy `PolymarketClient` so that strategies, jobs and the
-dashboard can swap exchanges without rewriting business logic.
+Wraps `py-clob-client-v2` (synchronous, CLOB V2) in an async interface that
+mirrors the public shape of the legacy `PolymarketClient` so that strategies,
+jobs and the dashboard can swap exchanges without rewriting business logic.
 
 Concept mapping (legacy exchange shape → Polymarket):
   ticker (string)               → condition_id (hex string)
@@ -20,7 +20,7 @@ attached `GammaClient` (set on construction or via :meth:`set_gamma_client`).
 
 Constructor is intentionally cheap (no network I/O). Underlying clients are
 materialised on first use, so importing this module never fails just because
-`py-clob-client` is not installed yet.
+`py-clob-client-v2` is not installed yet.
 """
 
 import asyncio
@@ -36,12 +36,15 @@ from src.config.settings import validate_endpoint_url
 
 
 # --------------------------------------------------------------------------
-# Constants — verified against py-clob-client source and Polymarket docs.
-# Update only after re-verification (Polygon explorer + SDK constants module).
+# Constants — CLOB V2 (py-clob-client-v2). Verify against SDK config module.
 # --------------------------------------------------------------------------
 
-# USDC.e (bridged USDC) on Polygon — the asset Polymarket settles in.
+# Legacy USDC.e (still useful for wrap/balance diagnostics).
 USDC_E_POLYGON = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+# CLOB V2 collateral: pUSD (Polymarket USD).
+PUSD_POLYGON = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
+# Prefer pUSD for trading balance; fall back to USDC.e when unset.
+COLLATERAL_TOKEN_POLYGON = PUSD_POLYGON
 
 # Default endpoints / chain
 DEFAULT_HOST = "https://clob.polymarket.com"
@@ -56,15 +59,13 @@ DEFAULT_GEOBLOCK_URL = "https://polymarket.com/api/geoblock"
 # launch. Plain JSON; safe to delete to force re-discovery.
 DEFAULT_TOKEN_CACHE_PATH = Path("data") / "token_cache.json"
 
-# Polymarket exchange contracts that need ERC20 allowance on USDC.e and on
-# the conditional-token ERC1155 (set-approval-for-all). Sourced from the
-# canonical example gist linked in the py-clob-client README:
-# https://gist.github.com/poly-rodr/44313920481de58d5a3f6d1f8226bd5e
-# Verify on PolygonScan before pushing real money through.
+# CLOB V2 exchange contracts that need ERC20 allowance on collateral (pUSD)
+# and set-approval-for-all on conditional tokens. Addresses from
+# py_clob_client_v2.config.get_contract_config(137).
 POLYMARKET_SPENDERS = {
-    "ctf_exchange":       "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
-    "neg_risk_exchange":  "0xC5d563A36AE78145C45a50134d48A1215220f80a",
-    "neg_risk_adapter":   "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296",
+    "ctf_exchange_v2":       "0xE111180000d2663C0091e4f400237545B87B996B",
+    "neg_risk_exchange_v2": "0xe2222d279d744050d28e00520010520000310F59",
+    "neg_risk_adapter":     "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296",
 }
 
 # Treat anything ≥ this allowance as "set" for routine bot operation.
@@ -203,8 +204,11 @@ class PolymarketClient(TradingLoggerMixin):
         self.signature_type = (
             signature_type
             if signature_type is not None
-            else int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0"))
+            else int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "3"))
         )
+        # CLOB V2 rejects EOA makers. If funder is missing but we have a key,
+        # resolve proxyWallet from Gamma on first authenticated use.
+        self._proxy_resolved = bool(self.funder)
         self.polygon_rpc_url = validate_endpoint_url(
             (polygon_rpc_url or os.getenv("POLYGON_RPC_URL", "") or DEFAULT_RPC_URL),
             what="POLYGON_RPC_URL",
@@ -220,7 +224,7 @@ class PolymarketClient(TradingLoggerMixin):
             )
 
         # Lazy underlyings
-        self._client: Optional[Any] = None  # py_clob_client.client.ClobClient
+        self._client: Optional[Any] = None  # py_clob_client_v2.client.ClobClient
         self._w3: Optional[Any] = None      # web3.Web3
         self._signer_address: Optional[str] = None
         self._api_creds_set = False
@@ -256,15 +260,47 @@ class PolymarketClient(TradingLoggerMixin):
         every market via :meth:`register_market`."""
         self._gamma = gamma_client
 
+    def _resolve_proxy_wallet_sync(self) -> None:
+        """Look up Gamma public-profile.proxyWallet for the signer EOA."""
+        if getattr(self, "_proxy_resolved", False) and self.funder:
+            return
+        try:
+            import httpx
+
+            eoa = self._get_signer_address()
+            url = f"https://gamma-api.polymarket.com/public-profile?address={eoa}"
+            with httpx.Client(timeout=15.0) as http:
+                resp = http.get(url)
+                resp.raise_for_status()
+                data = resp.json() or {}
+            proxy = (data.get("proxyWallet") or "").strip()
+            if proxy:
+                self.funder = proxy
+                self.logger.info(
+                    "Resolved Polymarket proxyWallet as funder",
+                    eoa=eoa,
+                    funder=proxy,
+                )
+            else:
+                self.logger.warning(
+                    "Gamma public-profile has no proxyWallet; set POLYMARKET_FUNDER",
+                    eoa=eoa,
+                )
+        except Exception as exc:
+            self.logger.warning(f"Failed to resolve proxyWallet: {exc}")
+        finally:
+            self._proxy_resolved = True
+
     def _ensure_clob(self) -> Any:
         if self._client is not None:
             return self._client
         try:
-            from py_clob_client.client import ClobClient
+            from py_clob_client_v2.client import ClobClient
         except ImportError as exc:  # pragma: no cover - import guard
             raise PolymarketAPIError(
-                "py-clob-client is not installed. "
-                "Run `pip install -r requirements.txt`."
+                "py-clob-client-v2 is not installed. "
+                "Run `pip install -r requirements.txt` "
+                "(CLOB V2 requires py-clob-client-v2, not legacy py-clob-client)."
             ) from exc
 
         if not self.private_key:
@@ -272,10 +308,15 @@ class PolymarketClient(TradingLoggerMixin):
                 "POLYMARKET_PRIVATE_KEY missing — cannot construct CLOB client."
             )
 
+        # CLOB V2 deposit-wallet flow needs funder before client construction.
+        if self.signature_type != 0 and not self.funder:
+            self._resolve_proxy_wallet_sync()
+
         kwargs: Dict[str, Any] = {
             "key": self.private_key,
             "chain_id": self.chain_id,
             "signature_type": self.signature_type,
+            "retry_on_error": True,
         }
         if self.funder:
             kwargs["funder"] = self.funder
@@ -287,7 +328,12 @@ class PolymarketClient(TradingLoggerMixin):
                 f"Failed to construct ClobClient: {exc}"
             ) from exc
 
-        self.logger.info("py-clob-client connected", host=self.host)
+        self.logger.info(
+            "py-clob-client-v2 connected",
+            host=self.host,
+            signature_type=self.signature_type,
+            funder=self.funder,
+        )
         return self._client
 
     async def _ensure_api_creds(self) -> None:
@@ -300,7 +346,8 @@ class PolymarketClient(TradingLoggerMixin):
         client = self._ensure_clob()
 
         def _set_creds() -> None:
-            creds = client.create_or_derive_api_creds()
+            # py-clob-client-v2: create_or_derive_api_key (v1 used *_api_creds)
+            creds = client.create_or_derive_api_key()
             client.set_api_creds(creds)
 
         try:
@@ -340,12 +387,13 @@ class PolymarketClient(TradingLoggerMixin):
         return self._signer_address
 
     def _get_funding_address(self) -> str:
-        """Address that holds USDC and receives shares.
+        """Address that holds collateral and is the CLOB order maker.
 
-        For an EOA wallet (signature_type=0) the funder defaults to the signer
-        address. For Magic-Link / Safe proxy wallets the funder is the proxy
-        address explicitly configured via POLYMARKET_FUNDER.
+        For signature_type 0 (legacy EOA) this is the signer. For deposit /
+        proxy flows (1/2/3) it is POLYMARKET_FUNDER / Gamma proxyWallet.
         """
+        if not self.funder and self.signature_type != 0:
+            self._resolve_proxy_wallet_sync()
         return self.funder or self._get_signer_address()
 
     # ------------------------------------------------------------------
@@ -451,45 +499,52 @@ class PolymarketClient(TradingLoggerMixin):
         return ids.yes if side_u == "YES" else ids.no
 
     # ------------------------------------------------------------------
-    # Balance / portfolio  (USDC.e on Polygon)
+    # Balance / portfolio  (pUSD preferred; USDC.e still reported)
     # ------------------------------------------------------------------
 
     async def get_balance(self, include_mtm: bool = True) -> Dict[str, Any]:
-        """USDC.e balance for the funding address (+ optional MTM on positions).
+        """Collateral balance for the funding address (+ optional MTM).
 
-        Returns a dict shaped to be backward-compatible with the legacy
-        exchange client:
-            {
-              "balance":         <int_cents>,        # legacy field
-              "balance_dollars": <float_dollars>,
-              "portfolio_value": <int_cents_mtm>,    # legacy field: MTM cents
-              "portfolio_value_dollars": <float>,    # MTM in dollars
-              "address":         "0x...",
-            }
-
-        With ``include_mtm=True`` (default) we walk the open positions from the
-        data API and add ``size × current_price`` for each. Pass
-        ``include_mtm=False`` for a fast cash-only read in latency-critical
-        paths (the data-API call adds ~200ms).
+        CLOB V2 settles in pUSD. We read pUSD first and also USDC.e (legacy /
+        pre-wrap). ``balance_dollars`` prefers pUSD; if pUSD is zero but
+        USDC.e remains, we surface USDC.e so ops can see funds that still
+        need wrapping via Polymarket UI / onramp.
         """
         addr = self._get_funding_address()
 
-        def _read_balance() -> int:
+        def _read_token_balance(token: str) -> int:
             w3 = self._ensure_w3()
             erc20 = w3.eth.contract(
-                address=w3.to_checksum_address(USDC_E_POLYGON),
+                address=w3.to_checksum_address(token),
                 abi=_ERC20_BALANCE_ABI,
             )
             return erc20.functions.balanceOf(w3.to_checksum_address(addr)).call()
 
         try:
-            raw = await asyncio.to_thread(_read_balance)
+            pusd_raw, usdc_raw = await asyncio.gather(
+                asyncio.to_thread(_read_token_balance, PUSD_POLYGON),
+                asyncio.to_thread(_read_token_balance, USDC_E_POLYGON),
+            )
         except Exception as exc:
             raise PolymarketAPIError(
-                f"Failed to read USDC.e balance for {addr}: {exc}"
+                f"Failed to read collateral balance for {addr}: {exc}"
             ) from exc
 
-        dollars = raw / 1_000_000  # USDC.e has 6 decimals
+        pusd_dollars = pusd_raw / 1_000_000
+        usdc_dollars = usdc_raw / 1_000_000
+        if pusd_dollars > 0:
+            dollars = pusd_dollars
+            collateral = "pUSD"
+        else:
+            dollars = usdc_dollars
+            collateral = "USDC.e"
+            if usdc_dollars > 0:
+                self.logger.warning(
+                    "pUSD balance is 0 but USDC.e remains — wrap USDC.e to pUSD "
+                    "on Polymarket before CLOB V2 trading will succeed",
+                    usdc_e=round(usdc_dollars, 2),
+                )
+
         portfolio_dollars = 0.0
         if include_mtm:
             try:
@@ -501,7 +556,6 @@ class PolymarketClient(TradingLoggerMixin):
                     cur = float(pos.get("current_price", 0) or 0)
                     portfolio_dollars += size * cur
             except Exception as exc:
-                # Non-fatal: balance still returns, MTM is just 0.
                 self.logger.warning(
                     f"MTM calculation failed (returning 0): {exc}"
                 )
@@ -512,17 +566,20 @@ class PolymarketClient(TradingLoggerMixin):
             "portfolio_value":         int(round(portfolio_dollars * 100)),
             "portfolio_value_dollars": portfolio_dollars,
             "address":                 addr,
+            "collateral_token":        collateral,
+            "pusd_dollars":            pusd_dollars,
+            "usdc_e_dollars":          usdc_dollars,
         }
 
     async def get_allowance(self, spender: str) -> int:
-        """Read the USDC.e allowance granted to `spender` from the funding
+        """Read the pUSD allowance granted to `spender` from the funding
         address. Returns the raw 6-decimal integer."""
         addr = self._get_funding_address()
 
         def _read() -> int:
             w3 = self._ensure_w3()
             erc20 = w3.eth.contract(
-                address=w3.to_checksum_address(USDC_E_POLYGON),
+                address=w3.to_checksum_address(COLLATERAL_TOKEN_POLYGON),
                 abi=_ERC20_BALANCE_ABI,
             )
             return erc20.functions.allowance(
@@ -534,7 +591,7 @@ class PolymarketClient(TradingLoggerMixin):
             return await asyncio.to_thread(_read)
         except Exception as exc:
             raise PolymarketAPIError(
-                f"Failed to read USDC allowance for spender={spender}: {exc}"
+                f"Failed to read pUSD allowance for {spender}: {exc}"
             ) from exc
 
     async def check_allowances(self) -> Dict[str, bool]:
@@ -745,9 +802,14 @@ class PolymarketClient(TradingLoggerMixin):
             return await asyncio.to_thread(_call)
         except Exception as exc:
             msg = str(exc).lower()
-            if "404" in msg or "no orderbook" in msg:
-                # Lifetime-volume leaders are often resolved / unlisted tokens
-                # with no live book. Callers treat empty bids/asks as skip.
+            if (
+                "404" in msg
+                or "no orderbook" in msg
+                or "server disconnected" in msg
+                or "request exception" in msg
+            ):
+                # Resolved / unlisted / transient network — callers treat empty
+                # bids/asks as skip. Do not escalate to ERROR spam.
                 return None
             raise PolymarketAPIError(
                 f"get_order_book failed for token_id={token_id}: {exc}"
@@ -804,13 +866,13 @@ class PolymarketClient(TradingLoggerMixin):
             )
 
         try:
-            from py_clob_client.clob_types import (
+            from py_clob_client_v2.clob_types import (
                 OrderArgs, MarketOrderArgs, OrderType, PartialCreateOrderOptions,
             )
-            from py_clob_client.order_builder.constants import BUY, SELL
+            from py_clob_client_v2.order_builder.constants import BUY, SELL
         except ImportError as exc:
             raise PolymarketAPIError(
-                "py-clob-client is not installed. "
+                "py-clob-client-v2 is not installed. "
                 "Run `pip install -r requirements.txt`."
             ) from exc
 
@@ -880,7 +942,7 @@ class PolymarketClient(TradingLoggerMixin):
                     token_id=token_id, amount=amount, side=poly_side,
                 )
                 signed = client.create_market_order(args, order_options)
-                return client.post_order(signed, OrderType.FOK)
+                return client.post_order(signed, order_type=OrderType.FOK)
             else:
                 args = OrderArgs(
                     token_id=token_id,
@@ -889,7 +951,7 @@ class PolymarketClient(TradingLoggerMixin):
                     side=poly_side,
                 )
                 signed = client.create_order(args, order_options)
-                return client.post_order(signed, OrderType.GTC)
+                return client.post_order(signed, order_type=OrderType.GTC)
 
         try:
             resp = await asyncio.to_thread(_send)
@@ -961,7 +1023,7 @@ class PolymarketClient(TradingLoggerMixin):
         Add `ticker=condition_id` to scope to a single market.
         """
         try:
-            from py_clob_client.clob_types import OpenOrderParams
+            from py_clob_client_v2.clob_types import OpenOrderParams
         except ImportError as exc:
             raise PolymarketAPIError(
                 "py-clob-client is not installed. "
@@ -974,7 +1036,11 @@ class PolymarketClient(TradingLoggerMixin):
         params = OpenOrderParams(market=ticker) if ticker else OpenOrderParams()
 
         def _call():
-            return client.get_orders(params)
+            # py-clob-client-v2 renamed get_orders → get_open_orders
+            getter = getattr(client, "get_open_orders", None) or getattr(
+                client, "get_orders", None
+            )
+            return getter(params)
 
         try:
             raw = await asyncio.to_thread(_call) or []
@@ -1031,7 +1097,7 @@ class PolymarketClient(TradingLoggerMixin):
         the SDK's `next_cursor` argument is supported but untested at scale.
         """
         try:
-            from py_clob_client.clob_types import TradeParams
+            from py_clob_client_v2.clob_types import TradeParams
         except ImportError as exc:
             raise PolymarketAPIError(
                 "py-clob-client is not installed. "
@@ -1177,19 +1243,31 @@ def _safe_float(x: Any) -> float:
         return 0.0
 
 
+def _book_levels(book: Any, side: str) -> List[Any]:
+    """Extract bids/asks from either a V2 dict book or a legacy object book."""
+    if book is None:
+        return []
+    if isinstance(book, dict):
+        return book.get(side) or []
+    return getattr(book, side, None) or []
+
+
+def _level_price_size(level: Any) -> tuple:
+    """Return (price, size) from a dict level or an object with attributes."""
+    if isinstance(level, dict):
+        return level.get("price"), level.get("size")
+    return getattr(level, "price", None), getattr(level, "size", None)
+
+
 def _bids_to_levels(book: Any) -> List[List[str]]:
-    """Convert SDK OrderBookSummary.bids → [[price_str, size_str], ...]
-    sorted highest-bid-first. The SDK exposes bids as a list of objects with
-    `.price` and `.size` string attributes."""
-    bids = getattr(book, "bids", None) or []
+    """Convert CLOB book bids → [[price_str, size_str], ...] highest-bid-first.
+
+    py-clob-client-v2 returns a plain dict with ``bids``/``asks`` lists of
+    ``{"price": "...", "size": "..."}``; legacy SDK used objects with attrs.
+    """
     out: List[List[str]] = []
-    for level in bids:
-        price = getattr(level, "price", None)
-        size = getattr(level, "size", None)
-        if price is None or size is None:
-            # dict-style fallback
-            price = level.get("price") if isinstance(level, dict) else None
-            size = level.get("size") if isinstance(level, dict) else None
+    for level in _book_levels(book, "bids"):
+        price, size = _level_price_size(level)
         if price is None or size is None:
             continue
         out.append([str(price), str(size)])
@@ -1198,14 +1276,9 @@ def _bids_to_levels(book: Any) -> List[List[str]]:
 
 
 def _asks_to_levels(book: Any) -> List[List[str]]:
-    asks = getattr(book, "asks", None) or []
     out: List[List[str]] = []
-    for level in asks:
-        price = getattr(level, "price", None)
-        size = getattr(level, "size", None)
-        if price is None or size is None:
-            price = level.get("price") if isinstance(level, dict) else None
-            size = level.get("size") if isinstance(level, dict) else None
+    for level in _book_levels(book, "asks"):
+        price, size = _level_price_size(level)
         if price is None or size is None:
             continue
         out.append([str(price), str(size)])

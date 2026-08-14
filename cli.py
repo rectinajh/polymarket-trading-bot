@@ -548,7 +548,7 @@ def cmd_health(args: argparse.Namespace) -> None:
 
     # 2. Required environment variables
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(override=True)
 
     for var, placeholder in (
         ("POLYMARKET_PRIVATE_KEY", "0xyour_polygon_private_key_here"),

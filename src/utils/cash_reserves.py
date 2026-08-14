@@ -59,15 +59,15 @@ class CashReservesManager:
         self.polymarket_client = polymarket_client
         self.logger = get_trading_logger("cash_reserves")
         
-        # UPDATED: Minimal cash reserve requirements for maximum deployment
-        self.minimum_reserve_pct = 0.5       # DECREASED: Only 0.5% minimum (was 1%)
-        self.optimal_reserve_pct = 1.0       # DECREASED: Only 1% optimal target (was 2%)
-        self.emergency_threshold_pct = 0.2   # DECREASED: 0.2% emergency halt (was 0.5%)
-        self.critical_threshold_pct = 0.05   # DECREASED: 0.05% critical threshold (was 0.1%)
+        # Disciplined cash reserves (aligned with settings / risk policy)
+        self.minimum_reserve_pct = 10.0
+        self.optimal_reserve_pct = 15.0
+        self.emergency_threshold_pct = 5.0
+        self.critical_threshold_pct = 2.0
         
-        # Additional safety parameters - MORE AGGRESSIVE
-        self.max_single_trade_impact = 5.0   # INCREASED: Allow 5% portfolio impact per trade (was 3%)
-        self.buffer_for_opportunities = 0.5  # DECREASED: Only 0.5% buffer (was 1%)
+        # Safety parameters
+        self.max_single_trade_impact = float(settings.trading.max_position_size_pct)
+        self.buffer_for_opportunities = 2.0
         
     async def check_cash_reserves(
         self,
@@ -88,6 +88,17 @@ class CashReservesManager:
             # Get current portfolio state
             if portfolio_value is None:
                 portfolio_value = await self._get_portfolio_value()
+            if portfolio_value is None or portfolio_value <= 0:
+                return CashReserveResult(
+                    can_trade=False,
+                    reason="Cannot verify cash reserves: portfolio value unavailable (RPC/balance failed)",
+                    current_cash=0.0,
+                    portfolio_value=0.0,
+                    cash_reserve_pct=0.0,
+                    required_reserve_pct=self.minimum_reserve_pct,
+                    emergency_status=True,
+                    recommended_actions=["Fix Polygon RPC / collateral balance reads before trading"],
+                )
             
             current_cash = await self._get_available_cash()
             current_reserve_pct = (current_cash / portfolio_value) * 100 if portfolio_value > 0 else 0
@@ -305,16 +316,16 @@ class CashReservesManager:
 
         except Exception as e:
             self.logger.error(f"Error calculating portfolio value: {e}")
-            return 100.0
+            raise
 
     async def _get_available_cash(self) -> float:
-        """Get available USDC.e balance for the funding wallet."""
+        """Get available collateral balance for the funding wallet."""
         try:
             balance_response = await self.polymarket_client.get_balance()
             return float(balance_response.get('balance_dollars', 0))
         except Exception as e:
             self.logger.error(f"Error getting available cash: {e}")
-            return 0.0
+            raise
     
     def _get_cash_recommendations(self, reserve_pct: float) -> List[str]:
         """Get recommendations based on cash reserve level."""

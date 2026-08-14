@@ -62,14 +62,14 @@ class PositionLimitsManager:
         self.polymarket_client = polymarket_client
         self.logger = get_trading_logger("position_limits")
         
-        # INCREASED: More aggressive limits for more opportunities
-        self.max_positions = 15  # INCREASED: Allow 15 positions (was 10)
-        self.max_position_size_pct = 5.0  # INCREASED: 5% max per trade (was 3%)
-        self.warning_threshold = self.max_positions - 3  # Warning at 12 positions
-        
-        # Additional safety limits - MORE AGGRESSIVE FOR FULL PORTFOLIO USE
-        self.emergency_position_limit = 20  # INCREASED: Higher emergency threshold (was 15)
-        self.min_cash_reserve_pct = 0.5  # DECREASED: Only 0.5% cash reserves (was 1% - nearly full deployment)
+        # Align with settings.trading (disciplined defaults)
+        self.max_positions = int(settings.trading.max_positions)
+        self.max_position_size_pct = float(settings.trading.max_position_size_pct)
+        self.warning_threshold = max(1, self.max_positions - 3)
+
+        # Safety limits derived from settings
+        self.emergency_position_limit = self.max_positions + 5
+        self.min_cash_reserve_pct = 10.0  # Keep at least 10% cash
         
     async def check_position_limits(
         self,
@@ -90,11 +90,19 @@ class PositionLimitsManager:
             # Get current portfolio state
             if portfolio_value is None:
                 portfolio_value = await self._get_portfolio_value()
-            
+            if portfolio_value is None or portfolio_value <= 0:
+                return PositionLimitResult(
+                    can_trade=False,
+                    reason="Cannot size positions: portfolio value unavailable (RPC/balance failed)",
+                    current_positions=0,
+                    max_positions=self.max_positions,
+                    current_portfolio_usage=0.0,
+                    max_position_size=0.0,
+                    recommended_actions=["Fix Polygon RPC / collateral balance reads before trading"],
+                )
+
             current_positions = await self._get_position_count()
             current_usage = await self._calculate_portfolio_usage(portfolio_value)
-            
-            # Calculate proposed position percentage
             proposed_position_pct = (proposed_position_size / portfolio_value) * 100
             max_position_size = portfolio_value * (self.max_position_size_pct / 100)
             
@@ -239,8 +247,8 @@ class PositionLimitsManager:
             return {'status': 'ERROR', 'message': str(e)}
     
     async def _get_position_count(self) -> int:
-        """Get current number of open positions."""
-        positions = await self.db_manager.get_open_positions()
+        """Get current number of open LIVE positions (paper excluded)."""
+        positions = await self.db_manager.get_open_positions(live_only=True)
         return len(positions)
     
     async def _get_portfolio_value(self) -> float:
@@ -278,17 +286,18 @@ class PositionLimitsManager:
 
         except Exception as e:
             self.logger.error(f"Error calculating portfolio value: {e}")
-            return 100.0  # Conservative fallback
-    
+            # Never invent a fake portfolio value — block new risk sizing.
+            raise
+
     async def _get_available_cash(self) -> float:
-        """Get available USDC.e balance for the funding wallet."""
+        """Get available collateral balance for the funding wallet."""
         try:
             balance_response = await self.polymarket_client.get_balance()
             return float(balance_response.get('balance_dollars', 0))
         except Exception as e:
             self.logger.error(f"Error getting available cash: {e}")
-            return 0.0
-    
+            raise
+
     async def _calculate_portfolio_usage(self, portfolio_value: float) -> float:
         """Calculate current portfolio usage percentage."""
         try:
@@ -297,12 +306,12 @@ class PositionLimitsManager:
             return (used_capital / portfolio_value) * 100
         except Exception as e:
             self.logger.error(f"Error calculating portfolio usage: {e}")
-            return 0.0
-    
+            raise
+
     async def _get_positions_for_closure(self, count: int) -> List[PositionToClose]:
-        """Get positions ranked by closure priority."""
+        """Get LIVE positions ranked by closure priority (ignore paper)."""
         try:
-            positions = await self.db_manager.get_open_positions()
+            positions = await self.db_manager.get_open_positions(live_only=True)
             
             closure_candidates = []
             for position in positions:

@@ -228,8 +228,8 @@ class GammaClient(TradingLoggerMixin):
                 least one of these tag IDs.
             exclude_tag_ids: Drop markets whose parent event has any of these
                 tag IDs.
-            order: Sort field (server-side). One of: volume, volume_24hr,
-                liquidity, end_date, start_date, competitive.
+            order: Sort field (server-side). One of: volume, volume24hr,
+                liquidity, endDate, startDate, competitive.
             ascending: Sort direction.
             max_results: Hard cap on returned markets.
             page_size: Per-request page size (Gamma caps around 500).
