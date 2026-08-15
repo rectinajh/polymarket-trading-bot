@@ -937,6 +937,7 @@ async def create_market_opportunities_from_markets(
                 opportunity.edge = edge_result.edge_magnitude  # Use filtered edge
                 opportunity.edge_percentage = edge_result.edge_percentage
                 opportunity.recommended_side = edge_result.side
+                opportunity.edge_reason = getattr(edge_result, "reason", "") or ""
                 
                 opportunities.append(opportunity)
                 logger.info(f"✅ EDGE APPROVED: {market.market_id} - Edge: {edge_result.edge_percentage:.1%} ({edge_result.side}), Confidence: {confidence:.1%}, Reason: {edge_result.reason}")
@@ -1158,7 +1159,23 @@ async def _evaluate_immediate_trade(
         # Create position directly
         from src.utils.database import Position
         from src.jobs.execute import execute_position
-        
+
+        edge_pct = getattr(opportunity, "edge_percentage", abs(opportunity.edge))
+        rec_side = getattr(opportunity, "recommended_side", side)
+        edge_reason = getattr(opportunity, "edge_reason", "") or ""
+        title = (opportunity.market_title or opportunity.market_id or "")[:120]
+        rationale = (
+            f"买入 {side}「{title}」。"
+            f"AI 预测 YES 概率 {opportunity.predicted_probability:.0%}，"
+            f"市场价 {opportunity.market_probability:.0%}，"
+            f"边缘 {edge_pct:.1%}（建议 {rec_side}），"
+            f"置信度 {opportunity.confidence:.0%}，Kelly {kelly_fraction:.0%}。"
+            f"止损 {exit_levels['stop_loss_pct']}% @ ${exit_levels['stop_loss_price']:.2f}，"
+            f"止盈 @ ${exit_levels['take_profit_price']:.2f}。"
+        )
+        if edge_reason:
+            rationale += f" 过滤理由：{edge_reason}"
+
         position = Position(
             market_id=opportunity.market_id,
             side=side,
@@ -1166,7 +1183,8 @@ async def _evaluate_immediate_trade(
             entry_price=entry_price,
             live=False,  # Will be set to True ONLY after successful execution
             timestamp=datetime.now(),
-            rationale=f"IMMEDIATE TRADE: Edge={opportunity.edge_percentage:.1%} ({opportunity.recommended_side}), Conf={opportunity.confidence:.1%}, Kelly={kelly_fraction:.1%}, Stop={exit_levels['stop_loss_pct']}%",
+            rationale=rationale,
+            confidence=opportunity.confidence,
             strategy="immediate_portfolio_optimization",
             
             # Enhanced exit strategy using Grok4 recommendations

@@ -536,6 +536,15 @@ class UnifiedAdvancedTradingSystem:
                         time_to_expiry_days=time_to_expiry_days
                     )
                     
+                    title = getattr(opportunity, "market_title", "") or market_id
+                    rationale = (
+                        f"组合配置买入 {intended_side}「{str(title)[:100]}」。"
+                        f"分配资本 {allocation_fraction:.1%}，"
+                        f"边缘 {opportunity.edge:.1%}，"
+                        f"置信度 {opportunity.confidence:.0%}。"
+                        f"止损 {exit_levels['stop_loss_pct']}% @ ${exit_levels['stop_loss_price']:.2f}，"
+                        f"止盈 @ ${exit_levels['take_profit_price']:.2f}。"
+                    )
                     # Create Position object
                     position = Position(
                         market_id=market_id,
@@ -543,7 +552,7 @@ class UnifiedAdvancedTradingSystem:
                         entry_price=price,
                         quantity=quantity,
                         timestamp=datetime.now(),
-                        rationale=f"Portfolio optimization allocation: {allocation_fraction:.1%} of capital. Edge: {opportunity.edge:.3f}, Confidence: {opportunity.confidence:.3f}, Stop: {exit_levels['stop_loss_pct']}%",
+                        rationale=rationale,
                         confidence=opportunity.confidence,
                         live=False,  # Will be set to True after execution
                         strategy="portfolio_optimization",

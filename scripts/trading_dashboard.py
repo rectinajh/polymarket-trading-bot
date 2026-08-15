@@ -24,6 +24,7 @@ import re
 from pathlib import Path
 from datetime import datetime, timedelta
 import json
+from typing import Optional
 
 # Add parent directory to path for imports
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -113,25 +114,154 @@ def _resolve_log_path() -> Path:
 
 
 def read_latest_logs(lines: int = 200, level_filter: str = "ALL") -> tuple[str, Path, int]:
-    """Read the last N lines from the bot log file (ANSI stripped)."""
+    """Read the last N lines from the bot log file (ANSI stripped).
+
+    Uses a byte-window tail read so large logs (10MB+) do not get fully loaded.
+    """
     path = _resolve_log_path()
     if not path.exists():
         return f"(log file not found: {path})", path, 0
 
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            raw_lines = f.readlines()
+        cleaned, approx_total = _tail_log_lines(path, max_lines=max(lines, 1) * 4 if level_filter != "ALL" else max(lines, 1))
     except OSError as exc:
         return f"(failed to read log: {exc})", path, 0
 
-    cleaned = [_ANSI_RE.sub("", line.rstrip("\n")) for line in raw_lines]
     if level_filter and level_filter != "ALL":
         token = f" {level_filter} "
-        cleaned = [line for line in cleaned if token in line or f"[{level_filter.lower()}" in line.lower()]
+        cleaned = [
+            line for line in cleaned
+            if token in line or f"[{level_filter.lower()}" in line.lower()
+        ]
     selected = cleaned[-lines:] if lines > 0 else cleaned
-    return "\n".join(selected) if selected else "(no matching log lines)", path, len(cleaned)
+    return "\n".join(selected) if selected else "(no matching log lines)", path, approx_total
 
-# @st.cache_data(ttl=60)  # Cache for 1 minute - temporarily disabled
+
+def _tail_log_lines(path: Path, max_lines: int, max_bytes: int = 2_000_000) -> tuple[list[str], int]:
+    """Return up to max_lines from end of file without reading the whole file."""
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        size = f.tell()
+        read_size = min(size, max_bytes)
+        f.seek(size - read_size)
+        raw = f.read()
+    text = raw.decode("utf-8", errors="replace")
+    lines = text.splitlines()
+    if size > read_size and lines:
+        # First line may be a partial chunk from mid-line.
+        lines = lines[1:]
+    cleaned = [_ANSI_RE.sub("", line) for line in lines]
+    # Approximate total line count from byte ratio when we only tailed.
+    if size > 0 and read_size > 0 and size > read_size:
+        approx_total = max(len(cleaned), int(len(cleaned) * (size / read_size)))
+    else:
+        approx_total = len(cleaned)
+    if max_lines > 0:
+        cleaned = cleaned[-max_lines:]
+    return cleaned, approx_total
+
+
+_CONF_IN_RATIONALE_RE = re.compile(r"Conf\s*=\s*([0-9.]+)\s*%?", re.IGNORECASE)
+
+
+def _parse_confidence(confidence, rationale: Optional[str] = None) -> Optional[float]:
+    """Prefer DB confidence; fall back to Conf=xx% embedded in rationale."""
+    if isinstance(confidence, (int, float)):
+        return float(confidence)
+    if not rationale:
+        return None
+    match = _CONF_IN_RATIONALE_RE.search(rationale)
+    if not match:
+        return None
+    value = float(match.group(1))
+    return value / 100.0 if value > 1.0 else value
+
+
+def _max_profit_if_win(entry_price: float, quantity: float) -> float:
+    """Binary outcome pays $1/share if correct → max profit = (1 - entry) * qty."""
+    return max(0.0, (1.0 - float(entry_price or 0)) * float(quantity or 0))
+
+
+def _outcome_unrealized_pnl(entry_price: float, current_price: float, size: float) -> float:
+    """PnL for a held outcome token. current_price is that token's mark (YES or NO)."""
+    return (float(current_price) - float(entry_price)) * float(size)
+
+
+def _enrich_position_fields(pos: dict) -> dict:
+    """Attach display helpers: trade cost, max profit, SL/TP flags, confidence."""
+    entry = float(pos.get("entry_price") or 0)
+    qty = float(pos.get("quantity") or 0)
+    rationale = pos.get("rationale") or ""
+    conf = _parse_confidence(pos.get("confidence"), rationale)
+    sl = pos.get("stop_loss_price")
+    tp = pos.get("take_profit_price")
+    pos["confidence"] = conf
+    pos["trade_amount"] = round(entry * qty, 4)
+    pos["max_profit"] = round(_max_profit_if_win(entry, qty), 4)
+    pos["has_stop_loss"] = sl is not None
+    pos["has_take_profit"] = tp is not None
+    pos["ai_suggestion"] = rationale or "—"
+    pos["title"] = pos.get("title") or pos.get("market_id") or "—"
+    return pos
+
+
+def build_participation_rows(positions: list, *, truncate_reason: int = 80) -> list[dict]:
+    """Chinese-labeled rows for participation / AI advice / exits."""
+    rows = []
+    for pos in positions:
+        entry = float(pos.get("entry_price") or 0)
+        qty = float(pos.get("quantity") or 0)
+        cur = pos.get("current_price")
+        sl = pos.get("stop_loss_price")
+        tp = pos.get("take_profit_price")
+        conf = pos.get("confidence")
+        reason = pos.get("rationale") or pos.get("ai_suggestion") or ""
+        if truncate_reason and len(reason) > truncate_reason:
+            reason_short = reason[:truncate_reason] + "…"
+        else:
+            reason_short = reason or "—"
+        trade_amt = pos.get("trade_amount")
+        if trade_amt is None:
+            trade_amt = entry * qty
+        max_profit = pos.get("max_profit")
+        if max_profit is None:
+            max_profit = _max_profit_if_win(entry, qty)
+        try:
+            ts = datetime.fromisoformat(pos["timestamp"])
+            time_str = ts.strftime("%m/%d %H:%M")
+        except Exception:
+            time_str = "—"
+
+        sl_tp = []
+        if sl is not None:
+            sl_tp.append(f"止损 ${float(sl):.3f}")
+        if tp is not None:
+            sl_tp.append(f"止盈 ${float(tp):.3f}")
+        sl_tp_text = " · ".join(sl_tp) if sl_tp else "未设置"
+
+        rows.append({
+            "项目": pos.get("title") or (pos.get("market_id") or "")[:24],
+            "方向": pos.get("side") or "—",
+            "参与理由 / AI建议": reason_short,
+            "AI置信度": f"{conf * 100:.0f}%" if isinstance(conf, (int, float)) else "—",
+            "投注金额": f"${float(trade_amt):.2f}",
+            "份额": qty if qty == int(qty) else round(qty, 2),
+            "入场价": f"${entry:.3f}",
+            "目前价格": f"${float(cur):.3f}" if isinstance(cur, (int, float)) else "—",
+            "理论最大利润": f"${float(max_profit):.2f}",
+            "当前浮盈": (
+                f"${float(pos['unrealized_pnl']):.3f}"
+                if isinstance(pos.get("unrealized_pnl"), (int, float))
+                else "—"
+            ),
+            "止损止盈": sl_tp_text,
+            "策略": pos.get("strategy") or "—",
+            "入场时间": time_str,
+        })
+    return rows
+
+
+@st.cache_data(ttl=45, show_spinner="加载持仓与策略数据…")
 def load_performance_data():
     """Load strategy stats + positions (DB TP/SL merged with live CLOB prices) + open orders."""
     try:
@@ -164,11 +294,11 @@ def load_performance_data():
             async with build_polymarket_clients() as (client, _gamma):
                 try:
                     positions_response = await client.get_positions()
-                except Exception as exc:
-                    st.warning(f"Could not fetch Polymarket positions: {exc}")
+                except Exception:
                     positions_response = {"market_positions": []}
 
                 live_keys = set()
+                live_market_ids: set[str] = set()
                 for pos in positions_response.get("market_positions", []):
                     size = float(pos.get("size", 0) or 0)
                     if size <= 0:
@@ -181,11 +311,15 @@ def load_performance_data():
                         side = "NO"
                     key = (cond.lower(), side)
                     live_keys.add(key)
+                    live_market_ids.add(cond)
                     dbp = db_by_key.get(key)
-                    entry = float(pos.get("avg_price", 0) or 0)
+                    entry = float(pos.get("avg_price", 0) or 0) or (
+                        float(dbp.entry_price) if dbp else 0.0
+                    )
                     cur = float(pos.get("current_price", 0) or 0)
                     qty = int(size) if size >= 1 else size
-                    unrealized = (cur - entry) * float(size) if side == "YES" else (entry - cur) * float(size)
+                    # Data API curPrice is the held outcome token mark — same formula for YES/NO.
+                    unrealized = _outcome_unrealized_pnl(entry, cur, float(size))
                     dist_sl = None
                     dist_tp = None
                     sl = dbp.stop_loss_price if dbp else None
@@ -202,7 +336,7 @@ def load_performance_data():
                         "token_id": str(pos.get("token_id", "")),
                         "side": side,
                         "quantity": qty,
-                        "entry_price": entry or (float(dbp.entry_price) if dbp else 0.0),
+                        "entry_price": entry,
                         "current_price": cur,
                         "unrealized_pnl": round(unrealized, 4),
                         "realized_pnl": float(pos.get("realized_pnl_dollars", 0) or 0),
@@ -214,15 +348,18 @@ def load_performance_data():
                         "take_profit_price": tp,
                         "max_hold_hours": dbp.max_hold_hours if dbp else None,
                         "confidence": dbp.confidence if dbp else None,
+                        "rationale": (dbp.rationale if dbp else None),
                         "dist_to_sl": round(dist_sl, 4) if dist_sl is not None else None,
                         "dist_to_tp": round(dist_tp, 4) if dist_tp is not None else None,
                         "source": "clob+db" if dbp else "clob_only",
+                        "_title_hint": pos.get("title") or pos.get("question"),
                     })
 
                 # DB-only opens not yet visible on CLOB (pending / indexing lag)
                 for key, dbp in db_by_key.items():
                     if key in live_keys:
                         continue
+                    live_market_ids.add(dbp.market_id)
                     positions.append({
                         "id": dbp.id,
                         "market_id": dbp.market_id,
@@ -242,10 +379,24 @@ def load_performance_data():
                         "take_profit_price": dbp.take_profit_price,
                         "max_hold_hours": dbp.max_hold_hours,
                         "confidence": dbp.confidence,
+                        "rationale": dbp.rationale,
                         "dist_to_sl": None,
                         "dist_to_tp": None,
                         "source": "db_only",
+                        "_title_hint": None,
                     })
+
+                title_ids = list(live_market_ids | {p.market_id for p in db_positions})
+                titles_by_id = await db_manager.get_market_titles(title_ids) if title_ids else {}
+                titles_by_id_lower = {str(k).lower(): v for k, v in titles_by_id.items()}
+                for pos in positions:
+                    mid = str(pos.get("market_id") or "")
+                    title = titles_by_id_lower.get(mid.lower()) or pos.get("_title_hint")
+                    if not title:
+                        title = mid[:24] + "…" if mid else "—"
+                    pos["title"] = title
+                    pos.pop("_title_hint", None)
+                    _enrich_position_fields(pos)
 
                 try:
                     orders_resp = await client.get_orders()
@@ -270,8 +421,8 @@ def load_performance_data():
                             "market": (o.get("market") or o.get("condition_id") or "")[:20] + "…",
                             "created": when,
                         })
-                except Exception as exc:
-                    st.warning(f"Could not fetch open orders: {exc}")
+                except Exception:
+                    pass
 
             await db_manager.close()
             return performance, positions, open_orders
@@ -281,10 +432,10 @@ def load_performance_data():
         return performance, positions, open_orders
 
     except Exception as e:
-        st.error(f"Error loading performance data: {e}")
-        return {}, [], []
+        # Avoid st.* inside cached loader (would sticky-cache UI side effects).
+        return {"__load_error__": str(e)}, [], []
 
-# @st.cache_data(ttl=30)  # Cache for 30 seconds - temporarily disabled
+@st.cache_data(ttl=45, show_spinner="加载 LLM 数据…")
 def load_llm_data():
     """Load LLM query data from database."""
     try:
@@ -488,6 +639,9 @@ def main():
     # Load data with error handling
     try:
         performance_data, positions, open_orders = load_performance_data()
+        if isinstance(performance_data, dict) and performance_data.get("__load_error__"):
+            st.error(f"Error loading performance data: {performance_data['__load_error__']}")
+            performance_data = {}
         llm_queries, llm_stats = load_llm_data()
         system_health_data = load_system_health()
     except Exception as e:
@@ -681,7 +835,7 @@ def render_equity_profit_chart(system_health_data: dict) -> None:
     )
     fig.update_yaxes(title_text="资金 ($)", secondary_y=False)
     fig.update_yaxes(title_text="盈亏 ($)", secondary_y=True)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
     st.caption(
         "盈亏 = 当前总权益 − 该时间窗口起点权益。充值会抬高权益曲线；"
         f"已实现平仓盈亏合计（trade_logs）≈ ${live_realized:.2f}。"
@@ -753,7 +907,7 @@ def show_overview(performance_data, positions, system_health_data, open_orders=N
                     "PolygonScan": f"https://polygonscan.com/tx/{txh}" if txh else "",
                 }
             )
-        st.dataframe(pd.DataFrame(dep_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(dep_rows), width="stretch", hide_index=True)
     else:
         st.info("暂未扫到近期 pUSD 转入（RPC 日志窗口有限，或尚无新充值）。")
 
@@ -775,44 +929,27 @@ def show_overview(performance_data, positions, system_health_data, open_orders=N
                     "PolygonScan": f"https://polygonscan.com/tx/{txh}" if txh else "",
                 }
             )
-        st.dataframe(pd.DataFrame(trade_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(trade_rows), width="stretch", hide_index=True)
     else:
         st.info("暂无成交记录（或 CLOB trades 拉取失败）。")
 
-    st.subheader("📌 持仓 · 止盈止损")
+    st.subheader("📌 参与项目摘要")
     if positions:
-        pos_rows = []
-        for pos in positions:
-            cur = pos.get("current_price")
-            sl = pos.get("stop_loss_price")
-            tp = pos.get("take_profit_price")
-            pos_rows.append(
-                {
-                    "Strategy": pos.get("strategy") or "",
-                    "Side": pos.get("side") or "",
-                    "Qty": pos.get("quantity"),
-                    "Entry": pos.get("entry_price"),
-                    "Mark": cur if cur is not None else "—",
-                    "uPnL": pos.get("unrealized_pnl") if pos.get("unrealized_pnl") is not None else "—",
-                    "Stop Loss": sl if sl is not None else "—",
-                    "Take Profit": tp if tp is not None else "—",
-                    "距止损": pos.get("dist_to_sl") if pos.get("dist_to_sl") is not None else "—",
-                    "距止盈": pos.get("dist_to_tp") if pos.get("dist_to_tp") is not None else "—",
-                    "Max Hold(h)": pos.get("max_hold_hours") if pos.get("max_hold_hours") is not None else "—",
-                    "Market": (pos.get("market_id") or "")[:18] + "…",
-                    "Source": pos.get("source") or "",
-                }
-            )
-        st.dataframe(pd.DataFrame(pos_rows), use_container_width=True, hide_index=True)
+        summary_cols = ["项目", "方向", "投注金额", "目前价格", "当前浮盈", "止损止盈", "AI置信度"]
+        summary_df = pd.DataFrame(build_participation_rows(positions, truncate_reason=0))
+        # Compact overview: drop long rationale column
+        keep = [c for c in summary_cols if c in summary_df.columns]
+        st.dataframe(summary_df[keep], width="stretch", hide_index=True)
         missing_exits = sum(1 for p in positions if not p.get("stop_loss_price") and not p.get("take_profit_price"))
         if missing_exits:
             st.caption(f"⚠️ {missing_exits} 个持仓缺少 DB 止盈/止损（多为链上同步、未写入本地策略记录）。")
+        st.caption("完整 AI 建议、理论最大利润与明细 → 侧边栏 **💼 Positions & Trades**")
     else:
         st.info("暂无持仓。")
 
     st.subheader("🧾 当前挂单（Open Orders）")
     if open_orders:
-        st.dataframe(pd.DataFrame(open_orders), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(open_orders), width="stretch", hide_index=True)
     else:
         st.info("当前没有挂单（或全部已成交/取消）。")
 
@@ -923,7 +1060,7 @@ def show_overview(performance_data, positions, system_health_data, open_orders=N
                 color_continuous_scale='RdYlGn'
             )
             fig_pnl.update_layout(showlegend=False, height=400)
-            st.plotly_chart(fig_pnl, use_container_width=True)
+            st.plotly_chart(fig_pnl, width="stretch")
         
         with col2:
             # Win rate by strategy
@@ -936,46 +1073,26 @@ def show_overview(performance_data, positions, system_health_data, open_orders=N
                 color_continuous_scale='Blues'
             )
             fig_winrate.update_layout(showlegend=False, height=400)
-            st.plotly_chart(fig_winrate, use_container_width=True)
+            st.plotly_chart(fig_winrate, width="stretch")
     else:
         st.info("📊 **No strategy data yet** - Run the trading system to start collecting performance data")
     
     # Recent activity summary
-    st.subheader("📋 Recent Activity")
+    st.subheader("📋 当前参与项目")
     
     if positions:
-        st.write(f"**{len(positions)} active positions:**")
-        
-        # Show top positions by value
-        position_data = []
-        for pos in positions[:10]:  # Top 10
-            # Convert timestamp string back to datetime for display
-            try:
-                timestamp = datetime.fromisoformat(pos['timestamp'])
-                time_str = timestamp.strftime('%m/%d %H:%M')
-            except:
-                time_str = 'Unknown'
-            
-            position_data.append({
-                'Market': pos['market_id'][:25] + '...' if len(pos['market_id']) > 25 else pos['market_id'],
-                'Side': pos['side'],
-                'Quantity': pos['quantity'],
-                'Entry Price': f"${pos['entry_price']:.3f}",
-                'Value': f"${pos['quantity'] * pos['entry_price']:.2f}",
-                'Strategy': pos['strategy'] or 'Unknown',
-                'Time': time_str
-            })
-        
-        if position_data:
-            df = pd.DataFrame(position_data)
-            st.dataframe(df, use_container_width=True, hide_index=True)
+        st.write(f"**{len(positions)} 个活跃持仓**（摘要；详情见 Positions & Trades）")
+        summary_cols = ["项目", "方向", "投注金额", "份额", "目前价格", "当前浮盈", "止损止盈"]
+        summary_df = pd.DataFrame(build_participation_rows(positions[:15], truncate_reason=0))
+        keep = [c for c in summary_cols if c in summary_df.columns]
+        st.dataframe(summary_df[keep], width="stretch", hide_index=True)
     else:
-        st.info("No active positions currently.")
+        st.info("当前没有参与中的项目。")
 
     # Compact latest-logs panel on Overview
     st.subheader("📋 Latest Bot Logs")
     log_text, log_path, total_lines = read_latest_logs(lines=40, level_filter="ALL")
-    st.caption(f"{log_path} · {total_lines} lines total · open **Live Logs** for more")
+    st.caption(f"{log_path} · ~{total_lines} lines total · open **Live Logs** for more")
     safe = (
         log_text.replace("&", "&amp;")
         .replace("<", "&lt;")
@@ -997,7 +1114,7 @@ def show_live_logs():
     with c3:
         auto_refresh = st.checkbox("Auto refresh (10s)", value=False)
     with c4:
-        if st.button("🔄 Refresh logs", use_container_width=True):
+        if st.button("🔄 Refresh logs", width="stretch"):
             st.rerun()
 
     log_text, log_path, total_lines = read_latest_logs(lines=int(line_count), level_filter=level)
@@ -1061,7 +1178,7 @@ def show_strategy_performance(performance_data):
             })
         
         df = pd.DataFrame(comparison_data)
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width="stretch", hide_index=True)
         
         # Performance charts
         col1, col2 = st.columns(2)
@@ -1093,7 +1210,7 @@ def show_strategy_performance(performance_data):
                 yaxis_title="Win Rate (%)",
                 height=500
             )
-            st.plotly_chart(fig_risk, use_container_width=True)
+            st.plotly_chart(fig_risk, width="stretch")
         
         with col2:
             # Capital deployment
@@ -1103,7 +1220,7 @@ def show_strategy_performance(performance_data):
                 title="Capital Deployment by Strategy"
             )
             fig_capital.update_layout(height=500)
-            st.plotly_chart(fig_capital, use_container_width=True)
+            st.plotly_chart(fig_capital, width="stretch")
     
     else:
         # Show individual strategy details
@@ -1197,7 +1314,7 @@ def show_llm_analysis(llm_queries, llm_stats):
                 color=[stats['total_cost'] for stats in llm_stats.values()],
                 color_continuous_scale='Blues'
             )
-            st.plotly_chart(fig_usage, use_container_width=True)
+            st.plotly_chart(fig_usage, width="stretch")
     
     # Query filters
     st.subheader("🔍 Query Analysis")
@@ -1289,7 +1406,7 @@ def show_positions_trades(positions, open_orders=None):
 
     st.subheader(f"🧾 Open Orders ({len(open_orders)})")
     if open_orders:
-        st.dataframe(pd.DataFrame(open_orders), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(open_orders), width="stretch", hide_index=True)
     else:
         st.info("当前没有挂单。")
     
@@ -1297,106 +1414,94 @@ def show_positions_trades(positions, open_orders=None):
         st.warning("No active positions found.")
         return
     
-    # Positions overview
-    st.subheader(f"📊 Active Positions ({len(positions)})")
-    
-    # Create positions DataFrame
-    position_data = []
-    for pos in positions:
-        try:
-            timestamp = datetime.fromisoformat(pos['timestamp'])
-            time_str = timestamp.strftime('%m/%d %H:%M')
-        except Exception:
-            time_str = 'Unknown'
-        cur = pos.get('current_price')
-        sl = pos.get('stop_loss_price')
-        tp = pos.get('take_profit_price')
-        entry = float(pos.get('entry_price') or 0)
-        qty = float(pos.get('quantity') or 0)
-        mark_val = (cur * qty) if isinstance(cur, (int, float)) else entry * qty
-        
-        position_data.append({
-            'ID': pos.get('id') or '—',
-            'Market ID': (pos.get('market_id') or '')[:22] + '…',
-            'Strategy': pos.get('strategy') or 'Unknown',
-            'Side': pos.get('side'),
-            'Qty': pos.get('quantity'),
-            'Entry': f"${entry:.3f}",
-            'Mark': f"${cur:.3f}" if isinstance(cur, (int, float)) else '—',
-            'Value': f"${mark_val:.2f}",
-            'uPnL': f"${pos['unrealized_pnl']:.3f}" if isinstance(pos.get('unrealized_pnl'), (int, float)) else '—',
-            'Stop Loss': f"${sl:.3f}" if sl else 'None',
-            'Take Profit': f"${tp:.3f}" if tp else 'None',
-            '距止损': f"{pos['dist_to_sl']:+.3f}" if isinstance(pos.get('dist_to_sl'), (int, float)) else '—',
-            '距止盈': f"{pos['dist_to_tp']:+.3f}" if isinstance(pos.get('dist_to_tp'), (int, float)) else '—',
-            'Max Hold(h)': pos.get('max_hold_hours') if pos.get('max_hold_hours') is not None else '—',
-            'Entry Time': time_str,
-            'Status': pos.get('status'),
-            'Source': pos.get('source') or '',
-        })
-    
-    df_positions = pd.DataFrame(position_data)
-    
-    # Positions filters
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        strategies = df_positions['Strategy'].unique().tolist()
-        selected_strategies = st.multiselect(
-            "Filter by Strategy",
-            strategies,
-            default=strategies
-        )
-    
-    with col2:
-        sides = df_positions['Side'].unique().tolist()
-        selected_sides = st.multiselect(
-            "Filter by Side",
-            sides,
-            default=sides
-        )
-    
-    # Apply filters
-    filtered_df = df_positions[
-        (df_positions['Strategy'].isin(selected_strategies)) &
-        (df_positions['Side'].isin(selected_sides))
-    ]
-    
-    # Display filtered positions
-    st.dataframe(filtered_df, use_container_width=True, hide_index=True)
-    
-    # Position analytics
-    if not filtered_df.empty:
-        st.subheader("📈 Position Analytics")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Value by strategy
-            strategy_values = filtered_df.groupby('Strategy')['Value'].apply(
-                lambda x: x.str.replace('$', '', regex=False).astype(float).sum()
-            )
-            
-            fig_strategy = px.pie(
-                values=strategy_values.values,
-                names=strategy_values.index,
-                title="Position Value by Strategy"
-            )
-            st.plotly_chart(fig_strategy, use_container_width=True)
-        
-        with col2:
-            # Side distribution
-            side_counts = filtered_df['Side'].value_counts()
-            
-            fig_sides = px.bar(
-                x=side_counts.index,
-                y=side_counts.values,
-                title="Positions by Side",
-                labels={'x': 'Side', 'y': 'Count'}
-            )
-            st.plotly_chart(fig_sides, use_container_width=True)
+    st.subheader(f"📊 参与项目（{len(positions)}）")
+    st.caption(
+        "理论最大利润 = 方向正确且每份兑付 $1 时的利润：(1 − 入场价) × 份额。"
+        "当前浮盈 = (目前价 − 入场价) × 份额（该 outcome token 市值变动）。"
+    )
 
-        with_exits = sum(1 for p in positions if p.get('stop_loss_price') or p.get('take_profit_price'))
+    # Filters
+    strategies = sorted({(p.get("strategy") or "Unknown") for p in positions})
+    sides = sorted({(p.get("side") or "?") for p in positions})
+    col1, col2 = st.columns(2)
+    with col1:
+        selected_strategies = st.multiselect("按策略筛选", strategies, default=strategies)
+    with col2:
+        selected_sides = st.multiselect("按方向筛选", sides, default=sides)
+
+    filtered = [
+        p for p in positions
+        if (p.get("strategy") or "Unknown") in selected_strategies
+        and (p.get("side") or "?") in selected_sides
+    ]
+
+    st.dataframe(
+        pd.DataFrame(build_participation_rows(filtered, truncate_reason=120)),
+        width="stretch",
+        hide_index=True,
+    )
+
+    st.subheader("🧠 AI 建议与止损止盈明细")
+    for pos in filtered:
+        title = pos.get("title") or pos.get("market_id") or "—"
+        conf = pos.get("confidence")
+        conf_txt = f"{conf * 100:.0f}%" if isinstance(conf, (int, float)) else "—"
+        cur = pos.get("current_price")
+        sl = pos.get("stop_loss_price")
+        tp = pos.get("take_profit_price")
+        upnl = pos.get("unrealized_pnl")
+        with st.expander(
+            f"{title} · {pos.get('side')} · 投注 ${float(pos.get('trade_amount') or 0):.2f}",
+            expanded=False,
+        ):
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("份额", pos.get("quantity"))
+            m2.metric("投注/交易金额", f"${float(pos.get('trade_amount') or 0):.2f}")
+            m3.metric("目前价格", f"${float(cur):.3f}" if isinstance(cur, (int, float)) else "—")
+            m4.metric("理论最大利润", f"${float(pos.get('max_profit') or 0):.2f}")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("入场价", f"${float(pos.get('entry_price') or 0):.3f}")
+            c2.metric("当前浮盈", f"${float(upnl):.3f}" if isinstance(upnl, (int, float)) else "—")
+            c3.metric("止损", f"${float(sl):.3f}" if sl is not None else "未设置")
+            c4.metric("止盈", f"${float(tp):.3f}" if tp is not None else "未设置")
+            st.markdown(f"**AI 置信度:** {conf_txt}")
+            st.markdown("**参与理由 / AI 投注建议**")
+            st.info(pos.get("rationale") or pos.get("ai_suggestion") or "无记录")
+            st.caption(
+                f"策略: {pos.get('strategy') or '—'} · "
+                f"距止损: {pos.get('dist_to_sl') if pos.get('dist_to_sl') is not None else '—'} · "
+                f"距止盈: {pos.get('dist_to_tp') if pos.get('dist_to_tp') is not None else '—'} · "
+                f"来源: {pos.get('source') or '—'}"
+            )
+
+    if filtered:
+        st.subheader("📈 Position Analytics")
+        value_by_strategy = {}
+        for p in filtered:
+            strat = p.get("strategy") or "Unknown"
+            value_by_strategy[strat] = value_by_strategy.get(strat, 0.0) + float(p.get("trade_amount") or 0)
+        col1, col2 = st.columns(2)
+        with col1:
+            fig_strategy = px.pie(
+                values=list(value_by_strategy.values()),
+                names=list(value_by_strategy.keys()),
+                title="投注金额 by Strategy",
+            )
+            st.plotly_chart(fig_strategy, width="stretch")
+        with col2:
+            side_counts = {}
+            for p in filtered:
+                side = p.get("side") or "?"
+                side_counts[side] = side_counts.get(side, 0) + 1
+            fig_sides = px.bar(
+                x=list(side_counts.keys()),
+                y=list(side_counts.values()),
+                title="Positions by Side",
+                labels={"x": "Side", "y": "Count"},
+            )
+            st.plotly_chart(fig_sides, width="stretch")
+
+        with_exits = sum(1 for p in positions if p.get("stop_loss_price") or p.get("take_profit_price"))
         st.caption(f"止盈/止损覆盖：{with_exits}/{len(positions)} 个持仓有本地 exit 计划（策略写入 DB）。")
 
 def show_risk_management(performance_data, positions, system_balance):
@@ -1516,7 +1621,7 @@ def show_risk_management(performance_data, positions, system_balance):
                     }
                     for strategy, data in strategy_risk.items()
                 ])
-                st.dataframe(strategy_df, use_container_width=True, hide_index=True)
+                st.dataframe(strategy_df, width="stretch", hide_index=True)
         
     except Exception as e:
         st.error(f"Error calculating risk metrics: {e}")

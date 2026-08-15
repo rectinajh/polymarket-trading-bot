@@ -462,6 +462,21 @@ class DatabaseManager(TradingLoggerMixin):
             rows = await cursor.fetchall()
             return {row[0] for row in rows}
 
+    async def get_market_titles(self, market_ids: Optional[List[str]] = None) -> Dict[str, str]:
+        """Return market_id -> title mapping. If market_ids given, filter to those."""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            if market_ids:
+                placeholders = ",".join("?" for _ in market_ids)
+                cursor = await db.execute(
+                    f"SELECT market_id, title FROM markets WHERE market_id IN ({placeholders})",
+                    list(market_ids),
+                )
+            else:
+                cursor = await db.execute("SELECT market_id, title FROM markets")
+            rows = await cursor.fetchall()
+            return {row["market_id"]: row["title"] for row in rows}
+
     async def is_position_opening_for_market(self, market_id: str) -> bool:
         """
         Checks if a position is currently being opened for a given market.
@@ -1026,6 +1041,7 @@ class DatabaseManager(TradingLoggerMixin):
     async def get_open_positions(self, live_only: bool = False) -> List[Position]:
         """Get open positions. If live_only=True, exclude paper fills."""
         async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
             if live_only:
                 cursor = await db.execute(
                     "SELECT * FROM positions WHERE status = 'open' AND live = 1"
@@ -1035,28 +1051,13 @@ class DatabaseManager(TradingLoggerMixin):
                     "SELECT * FROM positions WHERE status = 'open'"
                 )
             rows = await cursor.fetchall()
-            
+
             positions = []
             for row in rows:
-                # Convert database row to Position object
-                position = Position(
-                    market_id=row[1],
-                    side=row[2],
-                    entry_price=row[3],
-                    quantity=row[4],
-                    timestamp=datetime.fromisoformat(row[5]),
-                    rationale=row[6],
-                    confidence=row[7],
-                    live=bool(row[8]),
-                    status=row[9],
-                    id=row[0],
-                    stop_loss_price=row[10],
-                    take_profit_price=row[11],
-                    max_hold_hours=row[12],
-                    target_confidence_change=row[13]
-                )
-                positions.append(position)
-            
+                position_dict = dict(row)
+                position_dict["timestamp"] = datetime.fromisoformat(position_dict["timestamp"])
+                position_dict["live"] = bool(position_dict.get("live", 0))
+                positions.append(Position(**position_dict))
             return positions
 
     async def archive_paper_open_positions(self) -> int:
