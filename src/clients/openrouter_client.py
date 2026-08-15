@@ -542,6 +542,11 @@ class OpenRouterClient(TradingLoggerMixin):
 
                 if decision is not None:
                     # Log the successful query
+                    market_id = (
+                        market_data.get("ticker")
+                        or market_data.get("condition_id")
+                        or market_data.get("market_id")
+                    )
                     await self._log_query(
                         strategy="openrouter",
                         query_type="trading_decision",
@@ -551,6 +556,7 @@ class OpenRouterClient(TradingLoggerMixin):
                         cost_usd=cost,
                         confidence_extracted=decision.confidence,
                         decision_extracted=decision.action,
+                        market_id=market_id,
                     )
                     return decision
 

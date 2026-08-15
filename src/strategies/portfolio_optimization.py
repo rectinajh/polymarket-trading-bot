@@ -1298,7 +1298,10 @@ async def _get_fast_ai_prediction(
         response_text = await xai_client.get_completion(
             prompt,
             max_tokens=3000,  # Higher for reasoning models like grok-4
-            temperature=0.1   # Low temperature for consistency
+            temperature=0.1,   # Low temperature for consistency
+            market_id=market.market_id,
+            strategy="portfolio_optimization",
+            query_type="fast_ai_prediction",
         )
         
         # Check if AI response is None (API exhausted or failed)

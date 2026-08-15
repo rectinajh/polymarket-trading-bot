@@ -287,7 +287,21 @@ class CashReservesManager:
             
         except Exception as e:
             self.logger.error(f"Error getting cash status: {e}")
-            return {'status': 'ERROR', 'message': str(e)}
+            return {
+                'status': 'ERROR',
+                'message': str(e),
+                'current_cash': 0.0,
+                'portfolio_value': 0.0,
+                'reserve_percentage': 0.0,
+                'minimum_required': self.minimum_reserve_pct,
+                'optimal_target': self.optimal_reserve_pct,
+                'cash_shortfall': 0.0,
+                'cash_to_optimal': 0.0,
+                'trading_permitted': False,
+                'emergency_status': True,
+                'max_trade_size': 0.0,
+                'recommendations': ['Cash status unavailable — halt new trades until RPC recovers'],
+            }
     
     async def _get_portfolio_value(self) -> float:
         """Calculate total portfolio value (USDC cash + MTM on open positions)."""

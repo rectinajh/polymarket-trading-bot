@@ -42,8 +42,12 @@ async def should_exit_position(
             # Fallback to current price if no result available
             exit_price = current_price
         return True, "market_resolution", exit_price
+
+    # Missing / invalid book (404 → ask=0). Never treat as a real stop/TP signal.
+    if current_price is None or current_price <= 0:
+        return False, "invalid_market_price", current_price or 0.0
     
-    # 2. ENHANCED Stop-loss exit using proper logic for YES/NO positions
+    # 2. ENHANCED Stop-loss exit (YES/NO both long the outcome token)
     if position.stop_loss_price:
         from src.utils.stop_loss_calculator import StopLossCalculator
         
@@ -64,18 +68,9 @@ async def should_exit_position(
             )
             return True, f"stop_loss_triggered_pnl_{expected_pnl:.2f}", current_price
     
-    # 3. Take-profit exit (enhanced logic for YES/NO)
+    # 3. Take-profit exit (long outcome token → price rises to target)
     if position.take_profit_price:
-        take_profit_triggered = False
-        
-        if position.side == "YES":
-            # For YES positions, take profit when price rises above target
-            take_profit_triggered = current_price >= position.take_profit_price
-        else:
-            # For NO positions, take profit when price falls below target
-            take_profit_triggered = current_price <= position.take_profit_price
-            
-        if take_profit_triggered:
+        if current_price >= position.take_profit_price:
             return True, "take_profit", current_price
     
     # 4. Time-based exit
@@ -213,11 +208,31 @@ async def run_tracking(
                     logger.warning(f"Could not retrieve market data for {position.market_id}. Skipping.")
                     continue
 
-                # Get current prices
-                current_yes_price = market_data.get('yes_price', 0) / 100  # Convert cents to dollars
-                current_no_price = market_data.get('no_price', 0) / 100
+                # Prefer dollar fields; legacy cent fields are ask×100.
+                if "yes_ask_dollars" in market_data or "yes_price" in market_data:
+                    yes_ask_d = market_data.get("yes_ask_dollars")
+                    no_ask_d = market_data.get("no_ask_dollars")
+                    if yes_ask_d is not None:
+                        current_yes_price = float(yes_ask_d or 0)
+                    else:
+                        current_yes_price = float(market_data.get("yes_price", 0) or 0) / 100.0
+                    if no_ask_d is not None:
+                        current_no_price = float(no_ask_d or 0)
+                    else:
+                        current_no_price = float(market_data.get("no_price", 0) or 0) / 100.0
+                else:
+                    current_yes_price = 0.0
+                    current_no_price = 0.0
                 market_status = market_data.get('status', 'unknown')
                 market_result = market_data.get('result')  # Market resolution result
+
+                held_price = current_yes_price if position.side == "YES" else current_no_price
+                if market_status != "closed" and (held_price is None or held_price <= 0):
+                    logger.warning(
+                        f"Skipping exit checks for {position.market_id}: "
+                        f"no live book for {position.side} (price={held_price})."
+                    )
+                    continue
                 
                 # If position doesn't have exit strategy set, calculate defaults
                 if not position.stop_loss_price and not position.take_profit_price:

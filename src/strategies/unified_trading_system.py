@@ -225,7 +225,16 @@ class UnifiedAdvancedTradingSystem:
             
             # Check cash reserves
             cash_status = await cash_manager.get_cash_status()
-            self.logger.info(f"💰 CASH RESERVES STATUS: {cash_status['status']} ({cash_status['reserve_percentage']:.1f}%)")
+            if cash_status.get('status') == 'ERROR':
+                self.logger.error(
+                    f"💰 CASH RESERVES STATUS: ERROR — {cash_status.get('message')}; "
+                    f"halting new trades this cycle"
+                )
+                return TradingSystemResults()
+            self.logger.info(
+                f"💰 CASH RESERVES STATUS: {cash_status['status']} "
+                f"({cash_status.get('reserve_percentage', 0):.1f}%)"
+            )
             
             # Handle cash emergency first (higher priority)
             if cash_status['emergency_status']:

@@ -6,34 +6,35 @@ Provides consistent stop-loss calculation across all trading strategies.
 
 Key Features:
 - 5-10% stop-loss based on entry price and confidence
-- Adaptive stop-loss based on market volatility  
+- Adaptive stop-loss based on market volatility
 - Take-profit targets to lock in gains
 - Time-based exit strategies
+
+Both YES and NO holdings are long the outcome token: price up = profit,
+price down = loss. Exit levels are therefore symmetric for both sides.
 """
 
 from typing import Dict, Optional
-from datetime import datetime, timedelta
-import math
 
 
 class StopLossCalculator:
     """
     Centralized stop-loss calculation following Grok4 recommendations.
-    
+
     Implements 5-10% stop-losses to prevent large losses as identified
     in the performance analysis.
     """
-    
+
     # Grok4 recommended parameters
     MIN_STOP_LOSS_PCT = 0.05    # 5% minimum stop-loss
-    MAX_STOP_LOSS_PCT = 0.10    # 10% maximum stop-loss  
+    MAX_STOP_LOSS_PCT = 0.10    # 10% maximum stop-loss
     DEFAULT_STOP_LOSS_PCT = 0.07 # 7% default stop-loss
-    
+
     # Take-profit targets
     MIN_TAKE_PROFIT_PCT = 0.15   # 15% minimum take-profit
     MAX_TAKE_PROFIT_PCT = 0.30   # 30% maximum take-profit
     DEFAULT_TAKE_PROFIT_PCT = 0.20 # 20% default take-profit
-    
+
     @classmethod
     def calculate_stop_loss_levels(
         cls,
@@ -45,39 +46,40 @@ class StopLossCalculator:
     ) -> Dict[str, float]:
         """
         Calculate stop-loss and take-profit levels following Grok4 recommendations.
-        
+
         Args:
             entry_price: Position entry price (0.01 to 0.99)
-            side: Position side ("YES" or "NO")  
+            side: Position side ("YES" or "NO") — both are long the outcome token
             confidence: AI confidence level (0.0 to 1.0)
             market_volatility: Estimated market volatility
             time_to_expiry_days: Days until market expires
-            
+
         Returns:
             Dictionary with stop_loss_price, take_profit_price, max_hold_hours
         """
-        
+
         # Validate inputs
         entry_price = max(0.01, min(0.99, entry_price))
         confidence = confidence or 0.7
         market_volatility = market_volatility or 0.2
         time_to_expiry_days = time_to_expiry_days or 30.0
-        
+        _ = side  # side kept for API compat; levels are outcome-token-symmetric
+
         # Calculate stop-loss percentage based on confidence
         # Higher confidence = tighter stop-loss (more aggressive)
         # Lower confidence = wider stop-loss (more defensive)
         if confidence >= 0.8:
             stop_loss_pct = cls.MIN_STOP_LOSS_PCT  # 5% for high confidence
         elif confidence >= 0.6:
-            stop_loss_pct = cls.DEFAULT_STOP_LOSS_PCT  # 7% for medium confidence  
+            stop_loss_pct = cls.DEFAULT_STOP_LOSS_PCT  # 7% for medium confidence
         else:
             stop_loss_pct = cls.MAX_STOP_LOSS_PCT  # 10% for low confidence
-            
+
         # Adjust for market volatility
         # Higher volatility = wider stops to avoid getting stopped out by noise
         volatility_adjustment = min(1.5, 1.0 + (market_volatility - 0.2))
         adjusted_stop_loss_pct = stop_loss_pct * volatility_adjustment
-        
+
         # Calculate take-profit percentage (inverse of stop-loss logic)
         # Higher confidence = wider take-profit targets
         if confidence >= 0.8:
@@ -86,26 +88,20 @@ class StopLossCalculator:
             take_profit_pct = cls.DEFAULT_TAKE_PROFIT_PCT  # 20% for medium confidence
         else:
             take_profit_pct = cls.MIN_TAKE_PROFIT_PCT  # 15% for low confidence
-            
-        # Calculate actual price levels based on side
-        if side.upper() == "YES":
-            # For YES positions, stop-loss is below entry, take-profit is above
-            stop_loss_price = entry_price * (1 - adjusted_stop_loss_pct)
-            take_profit_price = entry_price * (1 + take_profit_pct)
-        else:
-            # For NO positions, stop-loss is above entry, take-profit is below  
-            stop_loss_price = entry_price * (1 + adjusted_stop_loss_pct)
-            take_profit_price = entry_price * (1 - take_profit_pct)
-            
+
+        # Outcome token (YES or NO): stop below entry, take-profit above.
+        stop_loss_price = entry_price * (1 - adjusted_stop_loss_pct)
+        take_profit_price = entry_price * (1 + take_profit_pct)
+
         # Ensure prices are within valid bounds (1¢ to 99¢)
         stop_loss_price = max(0.01, min(0.99, stop_loss_price))
         take_profit_price = max(0.01, min(0.99, take_profit_price))
-        
+
         # Calculate maximum hold time based on time to expiry
         # Hold for maximum 50% of time to expiry, or 72 hours, whichever is less
         max_hold_hours = min(72, time_to_expiry_days * 24 * 0.5)
         max_hold_hours = max(6, max_hold_hours)  # Minimum 6 hours
-        
+
         return {
             'stop_loss_price': round(stop_loss_price, 2),
             'take_profit_price': round(take_profit_price, 2),
@@ -114,7 +110,7 @@ class StopLossCalculator:
             'take_profit_pct': round(take_profit_pct * 100, 1),
             'target_confidence_change': 0.15  # Exit if confidence drops 15%
         }
-    
+
     @classmethod
     def calculate_simple_stop_loss(
         cls,
@@ -124,22 +120,19 @@ class StopLossCalculator:
     ) -> float:
         """
         Simple stop-loss calculation for quick use.
-        
+
         Args:
             entry_price: Position entry price
             side: Position side ("YES" or "NO")
             stop_loss_pct: Stop-loss percentage (default 7%)
-            
+
         Returns:
-            Stop-loss price
+            Stop-loss price (below entry for both YES and NO outcome tokens)
         """
-        if side.upper() == "YES":
-            stop_loss_price = entry_price * (1 - stop_loss_pct)
-        else:
-            stop_loss_price = entry_price * (1 + stop_loss_pct)
-            
+        _ = side
+        stop_loss_price = entry_price * (1 - stop_loss_pct)
         return max(0.01, min(0.99, round(stop_loss_price, 2)))
-    
+
     @classmethod
     def is_stop_loss_triggered(
         cls,
@@ -150,23 +143,22 @@ class StopLossCalculator:
     ) -> bool:
         """
         Check if stop-loss should be triggered.
-        
+
         Args:
             position_side: "YES" or "NO"
             entry_price: Original entry price
-            current_price: Current market price
+            current_price: Current market price of the held outcome token
             stop_loss_price: Calculated stop-loss price
-            
+
         Returns:
             True if stop-loss should be triggered
         """
-        if position_side.upper() == "YES":
-            # For YES positions, trigger if price drops below stop-loss
-            return current_price <= stop_loss_price
-        else:
-            # For NO positions, trigger if price rises above stop-loss
-            return current_price >= stop_loss_price
-    
+        _ = position_side, entry_price
+        if current_price is None or current_price <= 0:
+            return False
+        # Long outcome token: stop when mark falls to/below stop.
+        return current_price <= stop_loss_price
+
     @classmethod
     def calculate_pnl_at_stop_loss(
         cls,
@@ -177,15 +169,12 @@ class StopLossCalculator:
     ) -> float:
         """
         Calculate P&L if stop-loss is triggered.
-        
+
         Returns:
             Expected P&L (negative for loss)
         """
-        if side.upper() == "YES":
-            pnl_per_share = stop_loss_price - entry_price
-        else:
-            pnl_per_share = entry_price - stop_loss_price
-            
+        _ = side
+        pnl_per_share = stop_loss_price - entry_price
         return pnl_per_share * quantity
 
 
@@ -202,4 +191,4 @@ def calculate_stop_loss_levels(
         side=side,
         confidence=confidence,
         **kwargs
-    ) 
+    )

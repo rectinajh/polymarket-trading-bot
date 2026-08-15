@@ -382,6 +382,7 @@ REASON: [brief explanation]
                 return True
             else:
                 self.logger.error(f"❌ Failed to execute quick flip for {opportunity.market_id}")
+                await self.db_manager.update_position_status(position_id, "failed")
                 return False
                 
         except Exception as e:

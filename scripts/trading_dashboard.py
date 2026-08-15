@@ -325,9 +325,9 @@ def load_performance_data():
                     sl = dbp.stop_loss_price if dbp else None
                     tp = dbp.take_profit_price if dbp else None
                     if sl and cur:
-                        dist_sl = cur - float(sl) if side == "YES" else float(sl) - cur
+                        dist_sl = float(cur) - float(sl)
                     if tp and cur:
-                        dist_tp = float(tp) - cur if side == "YES" else cur - float(tp)
+                        dist_tp = float(tp) - float(cur)
 
                     positions.append({
                         "id": getattr(dbp, "id", None) if dbp else None,
