@@ -216,7 +216,8 @@ class OpenRouterClient(TradingLoggerMixin):
             self.daily_tracker.last_exhausted_time = datetime.now()
             self._save_daily_tracker()
             self.logger.warning(
-                "Daily OpenRouter cost limit reached",
+                "Daily LLM cost limit reached",
+                provider=getattr(settings.api, "llm_provider", "unknown"),
                 daily_cost=self.daily_tracker.total_cost,
                 daily_limit=self.daily_tracker.daily_limit,
                 requests_today=self.daily_tracker.request_count,
@@ -225,6 +226,7 @@ class OpenRouterClient(TradingLoggerMixin):
     async def _check_daily_limits(self) -> bool:
         """Return True if we are within the daily spending limit."""
         self.daily_tracker = self._load_daily_tracker()
+        provider = getattr(settings.api, "llm_provider", "unknown")
 
         if self.daily_tracker.is_exhausted:
             now = datetime.now()
@@ -236,13 +238,15 @@ class OpenRouterClient(TradingLoggerMixin):
                 )
                 self._save_daily_tracker()
                 self.logger.info(
-                    "New day -- OpenRouter daily limits reset",
+                    "New day -- LLM daily cost limits reset",
+                    provider=provider,
                     daily_limit=self.daily_tracker.daily_limit,
                 )
                 return True
 
             self.logger.info(
-                "OpenRouter daily limit reached -- request skipped",
+                "LLM daily cost limit reached -- request skipped",
+                provider=provider,
                 daily_cost=self.daily_tracker.total_cost,
                 daily_limit=self.daily_tracker.daily_limit,
             )

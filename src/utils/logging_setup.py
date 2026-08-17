@@ -16,6 +16,24 @@ from structlog import configure, get_logger
 from src.config.settings import settings
 
 
+class _DowngradeMissingOrderbookFilter(logging.Filter):
+    """py-clob SDK logs missing books as ERROR; treat as WARNING (expected skip)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        if record.levelno < logging.ERROR:
+            return True
+        if "No orderbook exists" in msg or (
+            "status=404" in msg and "/book" in msg
+        ):
+            record.levelno = logging.WARNING
+            record.levelname = "WARNING"
+        return True
+
+
 def setup_logging(log_level: str = "INFO") -> None:
     """
     Set up structured logging for the trading system.
@@ -39,6 +57,9 @@ def setup_logging(log_level: str = "INFO") -> None:
 
     # Silence noisy loggers
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    # Missing CLOB books are routine (resolved / not listed) — not app failures.
+    _clob_http = logging.getLogger("py_clob_client_v2.http_helpers.helpers")
+    _clob_http.addFilter(_DowngradeMissingOrderbookFilter())
 
     # Configure structlog for human-readable output
     structlog.configure(

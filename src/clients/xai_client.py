@@ -166,7 +166,8 @@ class XAIClient(TradingLoggerMixin):
         self._openrouter_client = None
 
         self.logger.info(
-            "XAIClient (OpenRouter delegate) initialized",
+            "XAIClient (LLM delegate) initialized",
+            provider=getattr(settings.api, "llm_provider", "unknown"),
             primary_model=self.primary_model,
             daily_limit=self.daily_tracker.daily_limit,
             today_cost=self.daily_tracker.total_cost,
@@ -237,14 +238,17 @@ class XAIClient(TradingLoggerMixin):
     # ------------------------------------------------------------------
 
     def _get_openrouter_client(self):
-        """Lazy-init OpenRouter client."""
+        """Lazy-init shared LLM client (OpenRouter-compatible; may be Kimi)."""
         if self._openrouter_client is None:
             try:
                 from src.clients.openrouter_client import OpenRouterClient
                 self._openrouter_client = OpenRouterClient(db_manager=self.db_manager)
-                self.logger.info("OpenRouter client initialised (via XAIClient shim)")
+                self.logger.info(
+                    "LLM client initialised (via XAIClient shim)",
+                    provider=getattr(settings.api, "llm_provider", "unknown"),
+                )
             except Exception as e:
-                self.logger.error(f"Failed to init OpenRouter client: {e}")
+                self.logger.error(f"Failed to init LLM client: {e}")
         return self._openrouter_client
 
     async def get_completion(

@@ -33,6 +33,7 @@ from typing import Dict, List, Optional, Tuple
 import aiosqlite
 
 from src.clients.gamma_client import GammaClient
+from src.utils.market_quality import should_skip_market_title
 
 logger = logging.getLogger(__name__)
 
@@ -56,13 +57,14 @@ SKIP_TITLE_PHRASES = [
     "mention", "say in", "speech mention", "address mention",
 ]
 
-# Thresholds (all in dollar format 0.00-1.00)
-MIN_VOLUME = 10
+# Thresholds (all in dollar format 0.00-1.00) — tightened post 2026-08 drawdown
+MIN_VOLUME = 5000
 MIN_NO_ASK = 0.80      # Lowest NO ask must be > $0.80
-MIN_EDGE = 0.03        # Edge (EV - price) must be > $0.03 (loosened from $0.05, approved 2026-03-29)
-MAX_POSITION_PCT = 0.10    # Max 10% of portfolio per position
+MIN_EDGE = 0.05        # Edge (EV - price) must be > $0.05
+MAX_POSITION_PCT = 0.05    # Max 5% of portfolio per position (small-capital safe)
 USE_KELLY = True
-MIN_CONFIDENCE = 0.4
+MIN_CONFIDENCE = 0.5
+MIN_ASK_SIZE = 5.0         # Require real NO ask depth when available
 
 
 # -----------------------------------------------------------------------
@@ -154,7 +156,7 @@ def market_confidence_score(ticker: str, orderbook: dict, market: dict) -> Tuple
         try:
             # Handle both old [price_cents, qty] and new [price_dollars_string, size_string]
             price = float(price_data)
-            qty = int(qty_data)
+            qty = int(float(qty_data))
             # Convert cents to dollars if needed
             if price > 1.0:
                 price = price / 100.0
@@ -165,7 +167,7 @@ def market_confidence_score(ticker: str, orderbook: dict, market: dict) -> Tuple
     for price_data, qty_data in no_side:
         try:
             price = float(price_data)
-            qty = int(qty_data)
+            qty = int(float(qty_data))
             # Convert cents to dollars if needed
             if price > 1.0:
                 price = price / 100.0
@@ -214,7 +216,12 @@ def market_confidence_score(ticker: str, orderbook: dict, market: dict) -> Tuple
         if not reasons:
             reasons.append("unclear spread")
 
-    volume = float(market.get("volume_fp", 0) or market.get("volume", 0) or 0)
+    volume = float(
+        market.get("volume_fp", 0)
+        or market.get("volume", 0)
+        or market.get("_volume_num", 0)
+        or 0
+    )
     days_to_expiry = market.get("_days_to_expiry", 30)
     vol_per_day = volume / max(days_to_expiry, 1)
     volume_score = min(1.0, vol_per_day / 50.0)
@@ -436,6 +443,9 @@ class SafeCompounder:
             title_lower = (m.get("question") or "").lower()
             if any(p in title_lower for p in SKIP_TITLE_PHRASES):
                 continue
+            skip_mq, _ = should_skip_market_title(m.get("question") or "")
+            if skip_mq:
+                continue
 
             cond = m.get("_condition_id") or m.get("conditionId") or ""
             yes_tok, no_tok = m.get("_token_ids", ("", ""))
@@ -500,6 +510,8 @@ class SafeCompounder:
                 # Stable ticker/title aliases for downstream code expecting them
                 "ticker": cond,
                 "title": m.get("question", ""),
+                "volume": volume,
+                "volume_fp": volume,
                 "_true_no_prob": true_no_prob,
                 "_hours_to_expiry": round(hours_to_expiry, 1),
                 "_days_to_expiry": round(hours_to_expiry / 24, 1),
@@ -551,15 +563,34 @@ class SafeCompounder:
             # Handle both new and old orderbook formats
             yes_bids = ob.get("yes_dollars", ob.get("yes", []))
             no_bids = ob.get("no_dollars", ob.get("no", []))
+            no_asks = ob.get("no_asks", []) or []
 
+            # Prefer real NO asks (actual sell liquidity) when present.
             lowest_no_ask = None
-            if yes_bids:
+            no_ask_size = 0.0
+            if no_asks:
+                try:
+                    priced = []
+                    for row in no_asks:
+                        p = float(row[0])
+                        sz = float(row[1])
+                        if p > 1.0:
+                            p = p / 100.0
+                        if p > 0 and sz > 0:
+                            priced.append((p, sz))
+                    if priced:
+                        lowest_no_ask, no_ask_size = min(priced, key=lambda x: x[0])
+                except (ValueError, TypeError, IndexError):
+                    lowest_no_ask = None
+
+            if lowest_no_ask is None and yes_bids:
                 try:
                     highest_yes_bid = max(float(b[0]) for b in yes_bids)
                     # Convert cents to dollars if needed
                     if highest_yes_bid > 1.0:
                         highest_yes_bid = highest_yes_bid / 100.0
                     lowest_no_ask = 1.0 - highest_yes_bid
+                    no_ask_size = MIN_ASK_SIZE  # derived — treat as meeting min size
                 except (ValueError, TypeError):
                     pass
 
@@ -575,8 +606,12 @@ class SafeCompounder:
 
             if lowest_no_ask is None and best_no_bid > 0:
                 lowest_no_ask = best_no_bid + 0.02  # 2¢ = $0.02
+                no_ask_size = MIN_ASK_SIZE
 
             if lowest_no_ask is None:
+                continue
+
+            if no_ask_size < MIN_ASK_SIZE:
                 continue
 
             if lowest_no_ask < self.min_no_ask:

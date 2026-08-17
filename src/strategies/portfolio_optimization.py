@@ -992,7 +992,16 @@ async def _evaluate_immediate_trade(
             IMMEDIATE_MIN_EXPECTED_RETURN,
             IMMEDIATE_MIN_VOLUME,
             IMMEDIATE_MAX_EXPIRY_DAYS,
+            IMMEDIATE_MIN_PORTFOLIO_USD,
         )
+
+        # Small-account circuit breaker: IMMEDIATE was the main blow-up path.
+        if float(total_capital or 0) < IMMEDIATE_MIN_PORTFOLIO_USD:
+            logger.info(
+                f"⏭️ Skip immediate: portfolio ${float(total_capital or 0):.2f} "
+                f"< ${IMMEDIATE_MIN_PORTFOLIO_USD:.0f} minimum"
+            )
+            return
 
         skip_title, skip_reason = should_skip_market_title(
             getattr(opportunity, "market_title", None)
@@ -1058,6 +1067,13 @@ async def _evaluate_immediate_trade(
             
             total_portfolio_value = available_cash + total_position_value
             logger.info(f"💰 Portfolio value: Cash=${available_cash:.2f} + Positions=${total_position_value:.2f} = Total=${total_portfolio_value:.2f}")
+
+            if total_portfolio_value < IMMEDIATE_MIN_PORTFOLIO_USD:
+                logger.info(
+                    f"⏭️ Skip immediate: live portfolio ${total_portfolio_value:.2f} "
+                    f"< ${IMMEDIATE_MIN_PORTFOLIO_USD:.0f} minimum"
+                )
+                return
             
         except Exception as e:
             logger.warning(f"Could not get portfolio value, using available cash: {e}")

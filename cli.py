@@ -46,6 +46,17 @@ def cmd_run(args: argparse.Namespace) -> None:
         print("⚠️  WARNING: LIVE TRADING MODE ENABLED")
         print("   This will use real money and place actual trades.")
 
+    conservative = getattr(args, "conservative", False)
+
+    # --conservative: Safe Compounder + Completeness Arb (no AI directional)
+    if conservative:
+        _run_conservative(
+            live_mode=live_mode,
+            loop=getattr(args, "loop", False),
+            interval=getattr(args, "interval", 300),
+        )
+        return
+
     # --safe-compounder mode: edge-based NO-side only
     if safe_compounder:
         _run_safe_compounder(
@@ -95,6 +106,14 @@ def cmd_run(args: argparse.Namespace) -> None:
         print("\nTrading bot stopped by user.")
 
 
+def _apply_live_flags(live_mode: bool) -> None:
+    """Align runtime settings with --live / --paper for place_order gates."""
+    from src.config.settings import settings
+
+    settings.trading.live_trading_enabled = bool(live_mode)
+    settings.trading.paper_trading_mode = not bool(live_mode)
+
+
 def _run_safe_compounder(
     live_mode: bool = False,
     loop: bool = False,
@@ -107,6 +126,8 @@ def _run_safe_compounder(
     """
     from src.clients import build_polymarket_clients
     from src.strategies.safe_compounder import SafeCompounder
+
+    _apply_live_flags(live_mode)
 
     print("🔒 SAFE COMPOUNDER MODE")
     print("   NO-side only | Edge-based | Near-certain outcomes")
@@ -144,6 +165,57 @@ def _run_safe_compounder(
             asyncio.run(_run_once())
     except KeyboardInterrupt:
         print("\nSafe Compounder stopped by user.")
+
+
+def _run_conservative(
+    live_mode: bool = False,
+    loop: bool = False,
+    interval: int = 300,
+) -> None:
+    """Phase A–C runner: Safe Compounder + Completeness Arb, no AI directional."""
+    from src.clients import build_polymarket_clients
+    from src.strategies.completeness_arb import CompletenessArb
+    from src.strategies.safe_compounder import SafeCompounder
+
+    _apply_live_flags(live_mode)
+
+    print("🛡️  CONSERVATIVE MODE (Safe Compounder + Completeness Arb)")
+    print("   No AI directional / IMMEDIATE trades.")
+    if not live_mode:
+        print("   DRY RUN — no real orders will be placed")
+    if loop:
+        print(f"   Continuous mode — every {interval}s. Ctrl-C to stop.")
+
+    async def _run_once():
+        async with build_polymarket_clients() as (client, gamma):
+            sc = SafeCompounder(client=client, gamma=gamma, dry_run=not live_mode)
+            sc_stats = await sc.run()
+            arb = CompletenessArb(client=client, gamma=gamma, dry_run=not live_mode)
+            arb_stats = await arb.run()
+            return {"safe_compounder": sc_stats, "completeness_arb": arb_stats}
+
+    async def _run_forever():
+        cycle = 0
+        while True:
+            cycle += 1
+            print(
+                f"\n──── Conservative Cycle {cycle} — "
+                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ────"
+            )
+            try:
+                await _run_once()
+            except Exception as exc:
+                print(f"Cycle {cycle} failed: {exc}. Continuing after {interval}s.")
+            print(f"\n⏳ Sleeping {interval}s before next cycle...")
+            await asyncio.sleep(interval)
+
+    try:
+        if loop:
+            asyncio.run(_run_forever())
+        else:
+            asyncio.run(_run_once())
+    except KeyboardInterrupt:
+        print("\nConservative mode stopped by user.")
 
 
 def cmd_dashboard(args: argparse.Namespace) -> None:
@@ -715,7 +787,8 @@ def build_parser() -> argparse.ArgumentParser:
             "examples:\n"
             "  python cli.py run                      Start AI Ensemble mode (default, paper)\n"
             "  python cli.py run --live               AI Ensemble with real capital\n"
-            "  python cli.py run --safe-compounder    Safe Compounder: conservative, math-only\n"
+            "  python cli.py run --conservative --live --loop   Recommended: SC + arb, no AI\n"
+            "  python cli.py run --safe-compounder    Safe Compounder: math-only NO-side\n"
             "  python cli.py run --safe-compounder --live  Safe Compounder live\n"
             "  python cli.py run --beast              Beast mode (aggressive, not recommended)\n"
             "  python cli.py scores                   Show category scores\n"
@@ -731,13 +804,10 @@ def build_parser() -> argparse.ArgumentParser:
         "run",
         help="Start the trading bot (disciplined mode by default)",
         description=(
-            "Launch one of the example trading strategies. Default is the AI "
-            "directional strategy: a single LLM call per market via OpenRouter "
-            "(fallback chain on error), with category scoring and portfolio "
-            "guardrails layered on top. Use --safe-compounder for the "
-            "conservative math-only NO-side strategy. Use --beast to run "
-            "without guardrails (not recommended). All three are starting "
-            "points — fork them, tune them, replace them."
+            "Launch a trading strategy. Prefer --conservative for small "
+            "capital (Safe Compounder + Completeness Arb, no AI directional). "
+            "Use --safe-compounder for NO-side only. Default/AI mode and "
+            "--beast are not recommended after the 2026-08 drawdown."
         ),
     )
     live_group = p_run.add_mutually_exclusive_group()
@@ -769,10 +839,15 @@ def build_parser() -> argparse.ArgumentParser:
         dest="safe_compounder",
         help="Safe Compounder: NO-side only, edge-based, near-certain outcomes",
     )
+    strategy_group.add_argument(
+        "--conservative",
+        action="store_true",
+        help="Conservative: Safe Compounder + Completeness Arb (no AI directional)",
+    )
     p_run.add_argument(
         "--loop",
         action="store_true",
-        help="Re-run the strategy continuously (only honored by --safe-compounder today)",
+        help="Re-run continuously (--conservative / --safe-compounder)",
     )
     p_run.add_argument(
         "--interval",

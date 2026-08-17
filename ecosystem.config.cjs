@@ -11,7 +11,7 @@ module.exports = {
       name: "polymarket-bot",
       cwd: "/www/polymarket-trading-bot",
       script: "/www/polymarket-trading-bot/.venv/bin/python",
-      args: "cli.py run --live --log-level INFO",
+      args: "cli.py run --conservative --live --loop --interval 300 --log-level INFO",
       interpreter: "none",
       autorestart: true,
       max_restarts: 20,

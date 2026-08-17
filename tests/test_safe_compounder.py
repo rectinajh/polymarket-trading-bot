@@ -65,10 +65,10 @@ def _book(yes_bid: float, yes_size: float = 100.0,
     get_orderbook returns)."""
     return {
         "orderbook": {
-            "yes":      [[str(yes_bid), str(yes_size)]],
+            "yes":      [[str(yes_bid), str(int(yes_size))]],
             "yes_asks": [[str(round(1 - no_bid, 4) if no_bid else round(1 - yes_bid + 0.01, 4)), "10"]],
-            "no":       [[str(no_bid), str(no_size)]] if no_bid else [],
-            "no_asks":  [],
+            "no":       [[str(no_bid), str(int(no_size))]] if no_bid else [],
+            "no_asks":  [[str(round(1 - yes_bid, 4)), str(int(yes_size))]],
         }
     }
 
@@ -140,8 +140,8 @@ class TestSafeCompounderE2E(unittest.TestCase):
         ($0.03). Should produce a candidate; in dry_run no real call but the
         opportunity gets processed."""
         markets = [_market(cond="0xb", yes_id="yb", no_id="nb",
-                           yes_last=0.03, days_to_expiry=2.0, volume=500.0)]
-        books = {"yb": _book(yes_bid=0.05)}
+                           yes_last=0.03, days_to_expiry=0.5, volume=5000.0)]
+        books = {"yb": _book(yes_bid=0.07)}  # NO ask≈0.93 → edge≈0.06 > 0.05
         c, client, registered, place = self._build_compounder(markets, books)
         c.dry_run = True
         result = _run(c.run())

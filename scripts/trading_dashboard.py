@@ -257,8 +257,229 @@ def build_participation_rows(positions: list, *, truncate_reason: int = 80) -> l
             "止损止盈": sl_tp_text,
             "策略": pos.get("strategy") or "—",
             "入场时间": time_str,
+            "_market_id": pos.get("market_id") or "",
         })
     return rows
+
+
+def _position_note_fingerprint(positions: list) -> tuple:
+    """Stable cache key: market/side/rounded price (refresh when MTM moves)."""
+    items = []
+    for p in positions or []:
+        mid = str(p.get("market_id") or "")
+        side = str(p.get("side") or "")
+        cur = p.get("current_price")
+        try:
+            cur_r = round(float(cur), 2) if cur is not None else None
+        except (TypeError, ValueError):
+            cur_r = None
+        items.append((mid, side, cur_r))
+    return tuple(sorted(items))
+
+
+def _parse_ai_notes_json(text: str) -> list[dict]:
+    """Extract a JSON list from model output (allow markdown fences)."""
+    if not text:
+        return []
+    raw = text.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+    try:
+        data = json.loads(raw)
+        if isinstance(data, list):
+            return [x for x in data if isinstance(x, dict)]
+        if isinstance(data, dict) and isinstance(data.get("notes"), list):
+            return [x for x in data["notes"] if isinstance(x, dict)]
+    except json.JSONDecodeError:
+        # try to find first [...] block
+        m = re.search(r"\[[\s\S]*\]", raw)
+        if m:
+            try:
+                data = json.loads(m.group(0))
+                if isinstance(data, list):
+                    return [x for x in data if isinstance(x, dict)]
+            except json.JSONDecodeError:
+                return []
+    return []
+
+
+@st.cache_data(ttl=900, show_spinner="生成 AI 观察文案（仅展示）…")
+def load_ai_watch_notes(fingerprint: tuple, payload: tuple) -> dict:
+    """Call LLM once for a batch of positions. Display-only; never places orders.
+
+    Returns {market_id: {"why": str, "risk": str}} or {"__error__": "..."}.
+    """
+    if not payload:
+        return {}
+
+    lines = []
+    for i, row in enumerate(payload, start=1):
+        (
+            mid,
+            title,
+            side,
+            entry,
+            cur,
+            upnl,
+            qty,
+            strategy,
+        ) = row
+        lines.append(
+            f"{i}. id={mid[:20]}… | {title[:80]} | side={side} | "
+            f"entry={entry} | now={cur} | qty={qty} | upnl={upnl} | strategy={strategy}"
+        )
+
+    prompt = (
+        "你是预测市场风控助手。下面是账户当前持仓摘要。"
+        "请对每个项目用中文各写两句：\n"
+        "1) why：为什么值得继续关注（或为何已不值得）\n"
+        "2) risk：主要风险一句话\n"
+        "硬性要求：不要给出买入/加仓/卖出指令；不要编造盘口数字；"
+        "若价格为0或缺失，说明可能无流动性/已结算。\n"
+        "只输出 JSON 数组，每项字段：market_id, why, risk。"
+        "market_id 必须与输入 id 前缀能对应（用完整 id 若你能从输入还原，"
+        "否则用输入里的 id= 值）。\n\n"
+        "持仓列表：\n" + "\n".join(lines)
+    )
+
+    async def _run():
+        from src.clients.xai_client import XAIClient
+
+        client = XAIClient()
+        try:
+            text = await client.get_completion(
+                prompt=prompt,
+                max_tokens=800,
+                temperature=0.2,
+                strategy="dashboard_watch",
+                query_type="dashboard_display",
+            )
+            return text
+        finally:
+            try:
+                await client.close()
+            except Exception:
+                pass
+
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            text = loop.run_until_complete(_run())
+        finally:
+            loop.close()
+    except Exception as exc:
+        return {"__error__": str(exc)}
+
+    if not text:
+        return {
+            "__error__": "AI 无返回（可能日预算已用尽）。文案仅展示，不影响交易。"
+        }
+
+    notes = _parse_ai_notes_json(text)
+    # Map back to full market_ids from fingerprint
+    id_by_prefix = {mid[:20]: mid for mid, _side, _cur in fingerprint}
+    out: dict = {}
+    for n in notes:
+        mid = str(n.get("market_id") or "").strip()
+        why = str(n.get("why") or "").strip()
+        risk = str(n.get("risk") or "").strip()
+        if not mid:
+            continue
+        full = mid
+        if mid not in {m for m, _, _ in fingerprint}:
+            # match by prefix
+            pref = mid[:20]
+            full = id_by_prefix.get(pref, mid)
+            for cand, _, _ in fingerprint:
+                if cand.startswith(mid) or mid.startswith(cand[:18]):
+                    full = cand
+                    break
+        out[full] = {"why": why or "—", "risk": risk or "—"}
+
+    # Fallback: if model ignored ids, zip in order
+    if not out and notes and fingerprint:
+        for (mid, _s, _c), n in zip(fingerprint, notes):
+            out[mid] = {
+                "why": str(n.get("why") or "—"),
+                "risk": str(n.get("risk") or "—"),
+            }
+    return out
+
+
+def render_ai_watch_notes(positions: list, *, expanded: bool = False) -> dict:
+    """UI block: optional AI why/risk lines. Never triggers trading."""
+    st.subheader("🤖 AI 观察（仅展示 · 不下单）")
+    st.caption(
+        "用模型写「为什么值得看 / 风险一句话」。不读取也不可下单；"
+        "会消耗少量 AI 日预算，结果缓存约 15 分钟。"
+    )
+    enable = st.checkbox(
+        "生成 / 显示 AI 观察文案",
+        value=False,
+        key="ai_watch_notes_enable",
+        help="关闭时不调用模型。开启后仅用于监控文案。",
+    )
+    if not enable:
+        st.info("已关闭。勾选上方即可生成观察文案。")
+        return {}
+
+    # Prefer positions with non-zero MTM; then fill up to 8
+    ranked = sorted(
+        positions or [],
+        key=lambda p: abs(float(p.get("current_price") or 0))
+        * float(p.get("quantity") or 0),
+        reverse=True,
+    )
+    ranked = [
+        p for p in ranked
+        if p.get("market_id")
+    ][:8]
+    if not ranked:
+        st.info("当前没有可注释的持仓。")
+        return {}
+
+    fingerprint = _position_note_fingerprint(ranked)
+    payload = []
+    for p in ranked:
+        cur = p.get("current_price")
+        upnl = p.get("unrealized_pnl")
+        payload.append(
+            (
+                str(p.get("market_id")),
+                str(p.get("title") or p.get("market_id") or "")[:100],
+                str(p.get("side") or ""),
+                f"{float(p.get('entry_price') or 0):.3f}",
+                f"{float(cur):.3f}" if isinstance(cur, (int, float)) else "n/a",
+                f"{float(upnl):.3f}" if isinstance(upnl, (int, float)) else "n/a",
+                float(p.get("quantity") or 0),
+                str(p.get("strategy") or "—"),
+            )
+        )
+
+    notes = load_ai_watch_notes(fingerprint, tuple(payload))
+    if notes.get("__error__"):
+        st.warning(notes["__error__"])
+        return {}
+
+    for p in ranked:
+        mid = p.get("market_id")
+        note = notes.get(mid) or {}
+        title = p.get("title") or mid
+        with st.expander(
+            f"{title} · {p.get('side')}",
+            expanded=expanded,
+        ):
+            st.markdown(f"**为什么值得看：** {note.get('why') or '（暂无）'}")
+            st.markdown(f"**风险一句话：** {note.get('risk') or '（暂无）'}")
+            cur = p.get("current_price")
+            st.caption(
+                f"入场 ${float(p.get('entry_price') or 0):.3f} · "
+                f"现价 {f'${float(cur):.3f}' if isinstance(cur, (int, float)) else '—'} · "
+                f"仅供参考，不构成交易指令"
+            )
+    return notes
 
 
 @st.cache_data(ttl=45, show_spinner="加载持仓与策略数据…")
@@ -564,7 +785,7 @@ def load_system_health():
                         source="dashboard",
                         min_interval_seconds=30,
                     )
-                    equity_snapshots = await dbm.get_equity_snapshots(hours=24 * 7)
+                    equity_snapshots = await dbm.get_equity_snapshots(hours=24 * 31)
                     await dbm.close()
                 except Exception as exc:
                     st.warning(f"Equity snapshot unavailable: {exc}")
@@ -723,6 +944,44 @@ def _filter_equity_snapshots(snapshots: list, hours: float) -> pd.DataFrame:
     return df
 
 
+def _daily_net_profit(
+    snapshots: list,
+    live_portfolio: float,
+) -> tuple[float, float, float]:
+    """Return (daily_net, start_of_day_equity, daily_net_pct).
+
+    Daily net = current equity − first snapshot on today's calendar date
+    (falls back to earliest snapshot in the last 24h if no same-day point).
+    """
+    today = datetime.now().date()
+    same_day: list[tuple[datetime, float]] = []
+    last_24h: list[tuple[datetime, float]] = []
+    cutoff_24h = datetime.now() - timedelta(hours=24)
+    for s in snapshots or []:
+        try:
+            ts = datetime.fromisoformat(str(s.get("ts")))
+        except (TypeError, ValueError):
+            continue
+        pv = float(s.get("portfolio_value") or 0)
+        if ts.date() == today:
+            same_day.append((ts, pv))
+        if ts >= cutoff_24h:
+            last_24h.append((ts, pv))
+
+    if same_day:
+        same_day.sort(key=lambda x: x[0])
+        start_equity = same_day[0][1]
+    elif last_24h:
+        last_24h.sort(key=lambda x: x[0])
+        start_equity = last_24h[0][1]
+    else:
+        start_equity = float(live_portfolio)
+
+    daily_net = float(live_portfolio) - float(start_equity)
+    pct = (daily_net / start_equity * 100.0) if start_equity > 1e-9 else 0.0
+    return daily_net, float(start_equity), pct
+
+
 def render_equity_profit_chart(system_health_data: dict) -> None:
     """Realtime-ish capital & profit chart for the Overview homepage."""
     st.subheader("📈 实时资金与利润")
@@ -730,7 +989,7 @@ def render_equity_profit_chart(system_health_data: dict) -> None:
     with c1:
         window_label = st.selectbox(
             "时间范围",
-            ["1 小时", "24 小时", "7 天"],
+            ["1 小时", "1 天（日）", "7 天（周）", "30 天（月）"],
             index=1,
             key="equity_window",
         )
@@ -739,7 +998,12 @@ def render_equity_profit_chart(system_health_data: dict) -> None:
     with c3:
         st.caption("每次打开/刷新会写入资金快照（最少间隔 30 秒）")
 
-    hours = {"1 小时": 1.0, "24 小时": 24.0, "7 天": 24.0 * 7}[window_label]
+    hours = {
+        "1 小时": 1.0,
+        "1 天（日）": 24.0,
+        "7 天（周）": 24.0 * 7,
+        "30 天（月）": 24.0 * 30,
+    }[window_label]
     snapshots = system_health_data.get("equity_snapshots") or []
     df = _filter_equity_snapshots(snapshots, hours)
 
@@ -768,6 +1032,15 @@ def render_equity_profit_chart(system_health_data: dict) -> None:
     latest = df.iloc[-1]
     start = df.iloc[0]
     profit_now = float(latest["portfolio_value"] - start["portfolio_value"])
+    profit_pct = (
+        profit_now / float(start["portfolio_value"]) * 100.0
+        if float(start["portfolio_value"]) > 1e-9
+        else 0.0
+    )
+    daily_net, day_start_equity, daily_pct = _daily_net_profit(
+        snapshots, live_portfolio
+    )
+
     m1, m2, m3, m4 = st.columns(4)
     with m1:
         st.metric("当前总权益", f"${float(latest['portfolio_value']):.2f}")
@@ -779,7 +1052,28 @@ def render_equity_profit_chart(system_health_data: dict) -> None:
         st.metric(
             f"区间盈亏 ({window_label})",
             f"${profit_now:+.2f}",
-            delta=f"相对区间起点 ${float(start['portfolio_value']):.2f}",
+            delta=f"{profit_pct:+.2f}% · 起点 ${float(start['portfolio_value']):.2f}",
+        )
+
+    d1, d2, d3 = st.columns(3)
+    with d1:
+        st.metric(
+            "每日净利润",
+            f"${daily_net:+.2f}",
+            help="今日当前总权益 − 今日首个资金快照权益（含充值影响）",
+        )
+    with d2:
+        st.metric(
+            "每日净利润 %",
+            f"{daily_pct:+.2f}%",
+            delta=f"今日起点 ${day_start_equity:.2f}",
+            help="每日净利润 / 今日起点权益",
+        )
+    with d3:
+        st.metric(
+            "区间收益率",
+            f"{profit_pct:+.2f}%",
+            help=f"相对所选时间窗口（{window_label}）起点的总权益变化百分比",
         )
 
     fig = make_subplots(specs=[[{"secondary_y": True}]])
@@ -837,7 +1131,8 @@ def render_equity_profit_chart(system_health_data: dict) -> None:
     fig.update_yaxes(title_text="盈亏 ($)", secondary_y=True)
     st.plotly_chart(fig, width="stretch")
     st.caption(
-        "盈亏 = 当前总权益 − 该时间窗口起点权益。充值会抬高权益曲线；"
+        "区间盈亏 = 当前总权益 − 该时间窗口起点权益。每日净利润按自然日计算。"
+        "充值会抬高权益与净利润；"
         f"已实现平仓盈亏合计（trade_logs）≈ ${live_realized:.2f}。"
     )
 
@@ -944,8 +1239,10 @@ def show_overview(performance_data, positions, system_health_data, open_orders=N
         if missing_exits:
             st.caption(f"⚠️ {missing_exits} 个持仓缺少 DB 止盈/止损（多为链上同步、未写入本地策略记录）。")
         st.caption("完整 AI 建议、理论最大利润与明细 → 侧边栏 **💼 Positions & Trades**")
+        render_ai_watch_notes(positions, expanded=False)
     else:
         st.info("暂无持仓。")
+        render_ai_watch_notes([], expanded=False)
 
     st.subheader("🧾 当前挂单（Open Orders）")
     if open_orders:
@@ -1441,6 +1738,8 @@ def show_positions_trades(positions, open_orders=None):
         hide_index=True,
     )
 
+    ai_notes = render_ai_watch_notes(filtered, expanded=False)
+
     st.subheader("🧠 AI 建议与止损止盈明细")
     for pos in filtered:
         title = pos.get("title") or pos.get("market_id") or "—"
@@ -1450,6 +1749,7 @@ def show_positions_trades(positions, open_orders=None):
         sl = pos.get("stop_loss_price")
         tp = pos.get("take_profit_price")
         upnl = pos.get("unrealized_pnl")
+        note = (ai_notes or {}).get(pos.get("market_id") or "") or {}
         with st.expander(
             f"{title} · {pos.get('side')} · 投注 ${float(pos.get('trade_amount') or 0):.2f}",
             expanded=False,
@@ -1465,7 +1765,10 @@ def show_positions_trades(positions, open_orders=None):
             c3.metric("止损", f"${float(sl):.3f}" if sl is not None else "未设置")
             c4.metric("止盈", f"${float(tp):.3f}" if tp is not None else "未设置")
             st.markdown(f"**AI 置信度:** {conf_txt}")
-            st.markdown("**参与理由 / AI 投注建议**")
+            if note.get("why") or note.get("risk"):
+                st.success(f"**为什么值得看：** {note.get('why') or '—'}")
+                st.warning(f"**风险一句话：** {note.get('risk') or '—'}")
+            st.markdown("**参与理由 / AI 投注建议（开仓时记录）**")
             st.info(pos.get("rationale") or pos.get("ai_suggestion") or "无记录")
             st.caption(
                 f"策略: {pos.get('strategy') or '—'} · "

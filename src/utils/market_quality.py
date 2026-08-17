@@ -77,6 +77,8 @@ IMMEDIATE_MIN_CONFIDENCE = 0.70
 IMMEDIATE_MIN_EXPECTED_RETURN = 0.08
 IMMEDIATE_MIN_VOLUME = 5000
 IMMEDIATE_MAX_EXPIRY_DAYS = 14
+# Small accounts: disable IMMEDIATE entirely (last week's blow-up path).
+IMMEDIATE_MIN_PORTFOLIO_USD = 100.0
 
 # No-book zombie archive: if held this long with no book, close in DB.
 NO_BOOK_ARCHIVE_HOURS = 6.0
