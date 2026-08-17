@@ -16,8 +16,8 @@ from structlog import configure, get_logger
 from src.config.settings import settings
 
 
-class _DowngradeMissingOrderbookFilter(logging.Filter):
-    """py-clob SDK logs missing books as ERROR; treat as WARNING (expected skip)."""
+class _DowngradeNoisyClobFilter(logging.Filter):
+    """py-clob SDK logs routine misses/disconnects as ERROR; treat as WARNING."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
@@ -26,9 +26,13 @@ class _DowngradeMissingOrderbookFilter(logging.Filter):
             return True
         if record.levelno < logging.ERROR:
             return True
-        if "No orderbook exists" in msg or (
-            "status=404" in msg and "/book" in msg
-        ):
+        noisy = (
+            "No orderbook exists" in msg
+            or ("status=404" in msg and "/book" in msg)
+            or "Server disconnected" in msg
+            or "Could not create api key" in msg
+        )
+        if noisy:
             record.levelno = logging.WARNING
             record.levelname = "WARNING"
         return True
@@ -57,9 +61,9 @@ def setup_logging(log_level: str = "INFO") -> None:
 
     # Silence noisy loggers
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    # Missing CLOB books are routine (resolved / not listed) — not app failures.
+    # Missing CLOB books / transient disconnects are routine — not app failures.
     _clob_http = logging.getLogger("py_clob_client_v2.http_helpers.helpers")
-    _clob_http.addFilter(_DowngradeMissingOrderbookFilter())
+    _clob_http.addFilter(_DowngradeNoisyClobFilter())
 
     # Configure structlog for human-readable output
     structlog.configure(

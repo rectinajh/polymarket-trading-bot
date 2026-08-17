@@ -1059,7 +1059,14 @@ class PolymarketClient(TradingLoggerMixin):
         await self._ensure_api_creds()
 
         def _call():
-            return client.cancel(order_id=order_id)
+            try:
+                from py_clob_client_v2.clob_types import OrderPayload
+                return client.cancel_order(OrderPayload(orderID=str(order_id)))
+            except TypeError:
+                # Older SDKs accepted a bare order id / cancel()
+                if hasattr(client, "cancel_order"):
+                    return client.cancel_order(order_id)
+                return client.cancel(order_id=order_id)
 
         try:
             resp = await asyncio.to_thread(_call)
