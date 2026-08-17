@@ -253,10 +253,10 @@ class UnifiedAdvancedTradingSystem:
                 if enforcement_result['action'] == 'positions_closed':
                     self.logger.info(f"✅ CLOSED {enforcement_result['positions_closed']} positions to meet limits")
             
-            # Step 1: Get ALL available markets (no time restrictions) - MORE PERMISSIVE VOLUME
+            # Step 1: Eligible markets — liquid only (post drawdown)
             markets = await self.db_manager.get_eligible_markets(
-            volume_min=200,  # DECREASED: Much lower volume requirement (was 50,000, now 200) for more opportunities
-            max_days_to_expiry=365  # Accept any timeline with dynamic exits
+            volume_min=float(getattr(settings.trading, "min_volume", 5000) or 5000),
+            max_days_to_expiry=int(getattr(settings.trading, "max_time_to_expiry_days", 14) or 14),
         )
             if not markets:
                 self.logger.warning("No markets available for trading")

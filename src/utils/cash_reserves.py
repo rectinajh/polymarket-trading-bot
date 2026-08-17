@@ -59,11 +59,11 @@ class CashReservesManager:
         self.polymarket_client = polymarket_client
         self.logger = get_trading_logger("cash_reserves")
         
-        # Disciplined cash reserves (aligned with settings / risk policy)
-        self.minimum_reserve_pct = 10.0
-        self.optimal_reserve_pct = 15.0
-        self.emergency_threshold_pct = 5.0
-        self.critical_threshold_pct = 2.0
+        # Disciplined cash reserves (post 2026-08 drawdown)
+        self.minimum_reserve_pct = 15.0
+        self.optimal_reserve_pct = 25.0
+        self.emergency_threshold_pct = 10.0
+        self.critical_threshold_pct = 5.0
         
         # Safety parameters
         self.max_single_trade_impact = float(settings.trading.max_position_size_pct)

@@ -199,19 +199,13 @@ async def place_sell_limit_order(
     db_manager: DatabaseManager,
     polymarket_client: PolymarketClient,
     live_mode: Optional[bool] = None,
+    aggressive: bool = False,
 ) -> bool:
     """
     Place a sell limit order to close an existing position.
-    
-    Args:
-        position: The position to close
-        limit_price: The limit price for the sell order (in dollars)
-        db_manager: Database manager
-        polymarket_client: Polymarket CLOB client
-        live_mode: Optional override; still gated by settings.trading.live_trading_enabled
-    
-    Returns:
-        True if order placed successfully (or paper-simulated), False otherwise
+
+    When aggressive=True (exits), retries at progressively lower prices and
+    finally attempts a market FOK sell so take-profit / stop-loss can complete.
     """
     logger = get_trading_logger("sell_limit_order")
     effective_live = _effective_live_mode(live_mode)
@@ -222,56 +216,93 @@ async def place_sell_limit_order(
             f"({position.quantity} {position.side} @ ${limit_price:.3f})"
         )
         return True
-    
-    try:
-        client_order_id = str(uuid.uuid4())
-        
-        # Convert price to cents for Polymarket CLOB
-        limit_price_cents = int(limit_price * 100)
-        
-        # For sell orders, we need to use the opposite side logic:
-        # - If we have YES position, we sell YES shares (action="sell", side="yes")
-        # - If we have NO position, we sell NO shares (action="sell", side="no")
-        side = position.side.lower()  # "YES" -> "yes", "NO" -> "no"
-        
-        order_params = {
-            "ticker": position.market_id,
-            "client_order_id": client_order_id,
-            "side": side,
-            "action": "sell",  # We're selling our existing position
-            "count": position.quantity,
-            "type_": "limit"
-        }
-        
-        # Add the appropriate price parameter based on what we're selling
-        if side == "yes":
-            order_params["yes_price"] = limit_price_cents
-        else:
-            order_params["no_price"] = limit_price_cents
-        
-        logger.info(f"🎯 Placing SELL LIMIT order: {position.quantity} {side.upper()} at {limit_price_cents}¢ for {position.market_id}")
-        
-        # Place the sell limit order
-        response = await polymarket_client.place_order(**order_params)
-        
-        if response and 'order' in response:
-            order_id = response['order'].get('order_id', client_order_id)
-            
-            # Record the sell order in the database (we could add a sell_orders table if needed)
-            logger.info(f"✅ SELL LIMIT ORDER placed successfully! Order ID: {order_id}")
-            logger.info(f"   Market: {position.market_id}")
-            logger.info(f"   Side: {side.upper()} (selling {position.quantity} shares)")
-            logger.info(f"   Limit Price: {limit_price_cents}¢")
-            logger.info(f"   Expected Proceeds: ${limit_price * position.quantity:.2f}")
-            
-            return True
-        else:
-            logger.error(f"❌ Failed to place sell limit order: {response}")
-            return False
-            
-    except Exception as e:
-        logger.error(f"❌ Error placing sell limit order for {position.market_id}: {e}")
-        return False
+
+    side = position.side.lower()
+    prices: list[float] = []
+    base = max(0.01, min(0.99, float(limit_price)))
+    prices.append(round(base, 2))
+    if aggressive:
+        for p in (
+            round(max(0.01, base - 0.02), 2),
+            round(max(0.01, base * 0.90), 2),
+            round(max(0.01, base * 0.75), 2),
+            round(max(0.01, base * 0.50), 2),
+            0.01,
+        ):
+            if p not in prices:
+                prices.append(p)
+
+    last_error: Optional[Exception] = None
+    for attempt, price in enumerate(prices, start=1):
+        try:
+            client_order_id = str(uuid.uuid4())
+            limit_price_cents = int(round(price * 100))
+            order_params = {
+                "ticker": position.market_id,
+                "client_order_id": client_order_id,
+                "side": side,
+                "action": "sell",
+                "count": position.quantity,
+                "type_": "limit",
+            }
+            if side == "yes":
+                order_params["yes_price"] = limit_price_cents
+            else:
+                order_params["no_price"] = limit_price_cents
+
+            logger.info(
+                f"🎯 Placing SELL LIMIT ({attempt}/{len(prices)}): "
+                f"{position.quantity} {side.upper()} at {limit_price_cents}¢ "
+                f"for {position.market_id}"
+            )
+            response = await polymarket_client.place_order(**order_params)
+            if response and "order" in response:
+                order_id = response["order"].get("order_id", client_order_id)
+                logger.info(
+                    f"✅ SELL LIMIT ORDER placed! Order ID: {order_id} "
+                    f"@ {limit_price_cents}¢ ({position.market_id})"
+                )
+                return True
+            logger.error(f"❌ Sell limit rejected: {response}")
+        except Exception as e:
+            last_error = e
+            logger.error(
+                f"❌ Sell limit attempt {attempt} failed for {position.market_id} "
+                f"@ ${price:.3f}: {e}"
+            )
+
+    if aggressive:
+        try:
+            client_order_id = str(uuid.uuid4())
+            logger.warning(
+                f"⚠️ Falling back to MARKET FOK sell for {position.market_id}"
+            )
+            order_params = {
+                "ticker": position.market_id,
+                "client_order_id": client_order_id,
+                "side": side,
+                "action": "sell",
+                "count": position.quantity,
+                "type_": "market",
+                "yes_price": int(round(base * 100)) if side == "yes" else None,
+                "no_price": int(round(base * 100)) if side == "no" else None,
+            }
+            # Remove Nones
+            order_params = {k: v for k, v in order_params.items() if v is not None}
+            response = await polymarket_client.place_order(**order_params)
+            if response and "order" in response:
+                logger.info(f"✅ MARKET FOK sell placed for {position.market_id}")
+                return True
+            logger.error(f"❌ Market sell rejected: {response}")
+        except Exception as e:
+            last_error = e
+            logger.error(f"❌ Market FOK sell failed for {position.market_id}: {e}")
+
+    if last_error:
+        logger.error(
+            f"❌ All sell attempts failed for {position.market_id}: {last_error}"
+        )
+    return False
 
 
 async def place_profit_taking_orders(
@@ -350,6 +381,7 @@ async def place_profit_taking_orders(
                             db_manager=db_manager,
                             polymarket_client=polymarket_client,
                             live_mode=True,
+                            aggressive=True,
                         )
                         
                         if success:
@@ -445,6 +477,7 @@ async def place_stop_loss_orders(
                             db_manager=db_manager,
                             polymarket_client=polymarket_client,
                             live_mode=True,
+                            aggressive=True,
                         )
                         
                         if success:

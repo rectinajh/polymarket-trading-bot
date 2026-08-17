@@ -865,6 +865,12 @@ async def create_market_opportunities_from_markets(
                 skipped_extreme += 1
                 continue
 
+            from src.utils.market_quality import should_skip_market_title
+            skip_title, skip_reason = should_skip_market_title(getattr(market, "title", None))
+            if skip_title:
+                logger.debug(f"Skip {market.market_id}: {skip_reason}")
+                continue
+
             market_data = await polymarket_client.get_market(market.market_id)
             if not market_data:
                 skipped_no_book += 1
@@ -977,31 +983,54 @@ async def _evaluate_immediate_trade(
     logger = get_trading_logger("immediate_trading")  # Move logger definition to the top
     
     try:
-        # Use enhanced edge filtering for immediate trading decisions
+        # Check if opportunity meets immediate trading criteria using edge filter
         from src.utils.edge_filter import EdgeFilter
-        
+        from src.utils.market_quality import (
+            should_skip_market_title,
+            IMMEDIATE_MIN_EDGE,
+            IMMEDIATE_MIN_CONFIDENCE,
+            IMMEDIATE_MIN_EXPECTED_RETURN,
+            IMMEDIATE_MIN_VOLUME,
+            IMMEDIATE_MAX_EXPIRY_DAYS,
+        )
+
+        skip_title, skip_reason = should_skip_market_title(
+            getattr(opportunity, "market_title", None)
+        )
+        if skip_title:
+            logger.info(
+                f"⏭️ Skip immediate {opportunity.market_id}: {skip_reason}"
+            )
+            return
+
         # Check if opportunity meets immediate trading criteria using edge filter
         should_trade, trade_reason, edge_result = EdgeFilter.should_trade_market(
             ai_probability=opportunity.predicted_probability,
             market_probability=opportunity.market_probability,
             confidence=opportunity.confidence,
             additional_filters={
-                'volume': getattr(opportunity, 'volume', 1000),
-                'min_volume': 1000,
+                'volume': getattr(opportunity, 'volume', 0) or 0,
+                'min_volume': IMMEDIATE_MIN_VOLUME,
                 'time_to_expiry_days': opportunity.time_to_expiry,
-                'max_time_to_expiry': 365
+                'max_time_to_expiry': IMMEDIATE_MAX_EXPIRY_DAYS,
             }
         )
         
-        # Additional criteria for immediate execution - MORE AGGRESSIVE
+        # Strict immediate gates after 2026-08 drawdown
         strong_opportunity = (
             should_trade and
-            edge_result.edge_percentage >= 0.10 and  # DECREASED: 10% edge for immediate execution (was 18%)
-            opportunity.confidence >= 0.50 and       # Align with settings.min_confidence_to_trade
-            opportunity.expected_return >= 0.05      # DECREASED: 5% expected return (was 8%)
+            edge_result.edge_percentage >= IMMEDIATE_MIN_EDGE and
+            opportunity.confidence >= IMMEDIATE_MIN_CONFIDENCE and
+            opportunity.expected_return >= IMMEDIATE_MIN_EXPECTED_RETURN
         )
         
         if not strong_opportunity:
+            if should_trade:
+                logger.debug(
+                    f"⏭️ Not strong enough for immediate: edge={edge_result.edge_percentage:.1%} "
+                    f"conf={opportunity.confidence:.1%} ret={opportunity.expected_return:.1%} "
+                    f"({trade_reason})"
+                )
             return  # Not strong enough for immediate action
         
         # Check position limits and get maximum allowed position size

@@ -245,25 +245,25 @@ class SentimentConfig:
 @dataclass
 class TradingConfig:
     """Trading strategy configuration."""
-    # Position sizing and risk management — DISCIPLINED DEFAULTS
-    max_position_size_pct: float = 3.0  # SANE: 3% per position (was 5% "beast mode")
-    max_daily_loss_pct: float = 10.0    # SANE: 10% daily loss limit (was 15%)
-    max_positions: int = 10              # SANE: 10 concurrent positions (was 15)
-    min_balance: float = 100.0          # SANE: $100 minimum balance (was $50)
+    # Position sizing and risk management — DISCIPLINED DEFAULTS (post 2026-08 drawdown)
+    max_position_size_pct: float = 2.0  # 2% per position for small accounts
+    max_daily_loss_pct: float = 10.0    # SANE: 10% daily loss limit
+    max_positions: int = 3              # Small capital: few concurrent positions
+    min_balance: float = 50.0           # Allow small accounts but keep gates tight
     
     # Market filtering criteria — DISCIPLINED
-    min_volume: float = 500.0           # SANE: Higher volume requirement (was 200 beast mode)
-    max_time_to_expiry_days: int = 14   # SANE: Shorter timeframes (was 30)
+    min_volume: float = 5000.0          # Require liquid markets
+    max_time_to_expiry_days: int = 14   # SANE: Shorter timeframes
     
     # AI decision making — DATA-DRIVEN THRESHOLDS  
-    min_confidence_to_trade: float = 0.50   # Balanced live threshold (was 60% too strict / 45% too loose)
+    min_confidence_to_trade: float = 0.70   # Raised after poor live calibration
     
     # Category-specific confidence adjustments (applied as multipliers to base threshold)
     category_confidence_adjustments: Dict[str, float] = field(default_factory=lambda: {
-        "sports": 0.90,      # Sports showed best performance (NCAAB 74% WR), lower threshold
-        "economics": 1.15,   # Economics showed -70% ROI, higher threshold required  
-        "politics": 1.05,    # Slight increase for political volatility
-        "default": 1.0       # Base multiplier for other categories
+        "sports": 1.25,      # Sports props burned capital — higher bar
+        "economics": 1.15,
+        "politics": 1.05,
+        "default": 1.0
     })
     
     scan_interval_seconds: int = 60      # SANE: 60-second scan interval (was 30)
@@ -280,8 +280,8 @@ class TradingConfig:
     
     # Kelly Criterion settings (PRIMARY position sizing method) — DISCIPLINED
     use_kelly_criterion: bool = True        # Use Kelly Criterion for position sizing (PRIMARY METHOD)
-    kelly_fraction: float = 0.25            # SANE: Quarter-Kelly (was 0.75 beast mode — gambling)
-    max_single_position: float = 0.03       # SANE: 3% max position cap (was 0.05 beast mode)
+    kelly_fraction: float = 0.15            # Conservative Kelly after drawdown
+    max_single_position: float = 0.02       # 2% max position cap
     
     # Live trading mode control — DRY_RUN wins over LIVE_TRADING_ENABLED (see resolve_live_trading_enabled)
     live_trading_enabled: bool = field(default_factory=resolve_live_trading_enabled)
@@ -290,7 +290,7 @@ class TradingConfig:
     # Trading frequency - MORE FREQUENT
     market_scan_interval: int = 30          # DECREASED: Scan every 30 seconds (was 60)
     position_check_interval: int = 15       # DECREASED: Check positions every 15 seconds (was 30)
-    max_trades_per_hour: int = 20           # INCREASED: Allow more trades per hour (was 10, now 20)
+    max_trades_per_hour: int = 8            # Cap churn after drawdown
     run_interval_minutes: int = 10          # DECREASED: Run more frequently (was 15, now 10)
     num_processor_workers: int = 5      # Number of concurrent market processor workers
     
@@ -304,15 +304,15 @@ class TradingConfig:
     high_confidence_market_odds: float = 0.90 # Market price to look for
     high_confidence_expiry_hours: int = 24   # Max hours until expiry
 
-    # AI trading criteria - MORE PERMISSIVE
-    max_analysis_cost_per_decision: float = 0.15  # INCREASED: Allow higher cost per decision (was 0.10, now 0.15)
-    min_confidence_threshold: float = 0.50  # Align with min_confidence_to_trade
+    # AI trading criteria
+    max_analysis_cost_per_decision: float = 0.15
+    min_confidence_threshold: float = 0.70  # Align with min_confidence_to_trade
 
-    # Cost control and market analysis frequency - MORE PERMISSIVE
-    daily_ai_budget: float = 10.0  # INCREASED: Higher daily budget (was 5.0, now 10.0)
-    max_ai_cost_per_decision: float = 0.08  # INCREASED: Higher per-decision cost (was 0.05, now 0.08)
-    analysis_cooldown_hours: int = 3  # DECREASED: Shorter cooldown (was 6, now 3)
-    max_analyses_per_market_per_day: int = 4  # INCREASED: More analyses per day (was 2, now 4)
+    # Cost control and market analysis frequency
+    daily_ai_budget: float = 10.0
+    max_ai_cost_per_decision: float = 0.08
+    analysis_cooldown_hours: int = 3
+    max_analyses_per_market_per_day: int = 4
     
     # Daily AI spending limits - SAFETY CONTROLS
     # Default is $10/day — conservative limit to prevent runaway API spend.
@@ -322,8 +322,8 @@ class TradingConfig:
     enable_daily_cost_limiting: bool = True  # Enable daily cost limits
     sleep_when_limit_reached: bool = True  # Sleep until next day when limit reached
 
-    # Enhanced market filtering to reduce analyses - MORE PERMISSIVE
-    min_volume_for_ai_analysis: float = 200.0  # DECREASED: Much lower threshold (was 500, now 200)
+    # Enhanced market filtering to reduce analyses
+    min_volume_for_ai_analysis: float = 5000.0
     exclude_low_liquidity_categories: List[str] = field(default_factory=lambda: [
         # REMOVED weather and entertainment - trade all categories
     ])
@@ -393,11 +393,11 @@ max_orders_per_market: int = 4          # Maximum orders per market (2 each side
 # === MARKET SELECTION (ENHANCED FOR MORE OPPORTUNITIES) ===
 # Removed time restrictions - trade ANY deadline with dynamic exits!
 # max_time_to_expiry_days: REMOVED      # No longer used - trade any timeline!
-min_volume_for_analysis: float = 200.0  # DECREASED: Much lower minimum volume (was 1000, now 200)
-min_volume_for_market_making: float = 500.0  # DECREASED: Lower volume for market making (was 2000, now 500)
-min_price_movement: float = 0.02        # DECREASED: Lower minimum range (was 0.05, now 2¢)
-max_bid_ask_spread: float = 0.15        # INCREASED: Allow wider spreads (was 0.10, now 15¢)
-min_confidence_long_term: float = 0.45  # DECREASED: Lower confidence for distant expiries (was 0.65, now 45%)
+min_volume_for_analysis: float = 5000.0
+min_volume_for_market_making: float = 5000.0
+min_price_movement: float = 0.02
+max_bid_ask_spread: float = 0.10
+min_confidence_long_term: float = 0.65
 
 # === COST OPTIMIZATION (MORE GENEROUS) ===
 # Enhanced cost controls for the beast mode system

@@ -29,24 +29,23 @@ class EdgeFilterResult:
 
 class EdgeFilter:
     """
-    Centralized edge filtering following Grok4 recommendations.
-    
-    UPDATED: More aggressive thresholds to allow more trading opportunities.
+    Centralized edge filtering.
+
+    Tightened after 2026-08 live drawdown: short sports props + loose
+    thresholds produced ~14% win rate and large MTM losses.
     """
-    
-    # LOOSENED: Allow more trading opportunities (approved 2026-03-29)
-    MIN_EDGE_REQUIREMENT = 0.04        # LOOSENED: 4% minimum edge (was 8%)
-    HIGH_CONFIDENCE_EDGE = 0.03        # LOOSENED: 3% edge for high confidence (was 6%)  
-    MEDIUM_CONFIDENCE_EDGE = 0.05      # LOOSENED: 5% edge for medium confidence (was 8%)
-    LOW_CONFIDENCE_EDGE = 0.08         # LOOSENED: 8% edge for low confidence (was 12%)
-    
-    # LOOSENED: Lower confidence floor for more opportunities
-    MIN_CONFIDENCE_FOR_TRADE = 0.35    # LOOSENED: 35% minimum confidence (was 50%)
-    MAX_ACCEPTABLE_RISK = 0.6          # INCREASED: 60% max position risk (was 50%)
-    
-    # UPDATED: More permissive quality filters
-    MIN_VOLUME_FOR_HIGH_EDGE = 500     # DECREASED: Lower volume requirement (was 2000, now 500)
-    MIN_SPREAD_QUALITY = 0.03          # INCREASED: Allow wider spreads (was 0.02, now 0.03)
+
+    # Disciplined thresholds
+    MIN_EDGE_REQUIREMENT = 0.08        # 8% minimum edge
+    HIGH_CONFIDENCE_EDGE = 0.06        # 6% for high confidence
+    MEDIUM_CONFIDENCE_EDGE = 0.10      # 10% for medium confidence
+    LOW_CONFIDENCE_EDGE = 0.15         # 15% for low confidence
+
+    MIN_CONFIDENCE_FOR_TRADE = 0.60    # 60% minimum confidence
+    MAX_ACCEPTABLE_RISK = 0.4          # 40% max position risk
+
+    MIN_VOLUME_FOR_HIGH_EDGE = 5000    # Require liquid markets
+    MIN_SPREAD_QUALITY = 0.02          # Tighter spreads
     
     @classmethod
     def calculate_edge(

@@ -228,28 +228,84 @@ async def run_tracking(
 
                 held_price = current_yes_price if position.side == "YES" else current_no_price
                 if market_status != "closed" and (held_price is None or held_price <= 0):
-                    logger.warning(
-                        f"Skipping exit checks for {position.market_id}: "
-                        f"no live book for {position.side} (price={held_price})."
-                    )
+                    from src.utils.market_quality import NO_BOOK_ARCHIVE_HOURS
+                    hours_held = (datetime.now() - position.timestamp).total_seconds() / 3600
+                    status_l = str(market_status or "").lower()
+                    looks_dead = status_l in (
+                        "closed", "resolved", "settled", "archived", "inactive"
+                    ) or hours_held >= NO_BOOK_ARCHIVE_HOURS
+                    if looks_dead and position.id is not None:
+                        # No live book — cannot sell. Archive DB so limits/cash
+                        # aren't blocked by zombies (MTM already ~0 on chain).
+                        exit_price = 0.0
+                        pnl = (exit_price - position.entry_price) * position.quantity
+                        reason = (
+                            f"expired_no_book_after_{hours_held:.1f}h"
+                            if hours_held >= NO_BOOK_ARCHIVE_HOURS
+                            else f"no_book_status_{market_status}"
+                        )
+                        logger.warning(
+                            f"Archiving zombie position {position.market_id}: {reason} "
+                            f"(no live book). Recording PnL=${pnl:.2f}"
+                        )
+                        trade_log = TradeLog(
+                            market_id=position.market_id,
+                            side=position.side,
+                            entry_price=position.entry_price,
+                            exit_price=exit_price,
+                            quantity=position.quantity,
+                            pnl=pnl,
+                            entry_timestamp=position.timestamp,
+                            exit_timestamp=datetime.now(),
+                            rationale=f"{position.rationale} | EXIT: {reason}",
+                            strategy=position.strategy,
+                        )
+                        await db_manager.add_trade_log(trade_log)
+                        await db_manager.update_position_status(position.id, "closed")
+                        resolution_exits += 1
+                    else:
+                        logger.warning(
+                            f"Skipping exit checks for {position.market_id}: "
+                            f"no live book for {position.side} (price={held_price}, "
+                            f"held={hours_held:.1f}h)."
+                        )
                     continue
                 
-                # If position doesn't have exit strategy set, calculate defaults
+                # Ensure exit levels exist
                 if not position.stop_loss_price and not position.take_profit_price:
                     logger.info(f"Setting up exit strategy for position {position.market_id}")
                     exit_levels = await calculate_dynamic_exit_levels(position)
-                    
-                    # Update position with exit strategy (this would need a new DB method)
-                    # For now, we'll apply them dynamically
                     position.stop_loss_price = exit_levels["stop_loss_price"]
-                    position.take_profit_price = exit_levels["take_profit_price"] 
+                    position.take_profit_price = exit_levels["take_profit_price"]
                     position.max_hold_hours = exit_levels["max_hold_hours"]
                     position.target_confidence_change = exit_levels["target_confidence_change"]
 
-                # Check if position should be exited (market resolution, time-based, etc.)
-                should_exit, exit_reason, exit_price = await should_exit_position(
-                    position, current_yes_price, current_no_price, market_status, market_result
-                )
+                # Near-expiry force exit when we still have a book
+                should_exit = False
+                exit_reason = ""
+                exit_price = held_price
+                exp_ts = market_data.get("expiration_ts") or 0
+                try:
+                    exp_ts = int(exp_ts or 0)
+                except (TypeError, ValueError):
+                    exp_ts = 0
+                if exp_ts > 0:
+                    from src.utils.market_quality import FORCE_EXIT_HOURS_BEFORE_EXPIRY
+                    hours_left = (exp_ts - datetime.now().timestamp()) / 3600.0
+                    if 0 < hours_left <= FORCE_EXIT_HOURS_BEFORE_EXPIRY:
+                        logger.info(
+                            f"Force exit {position.market_id}: {hours_left:.2f}h to expiry"
+                        )
+                        should_exit, exit_reason, exit_price = (
+                            True,
+                            "force_exit_near_expiry",
+                            held_price,
+                        )
+
+                if not should_exit:
+                    should_exit, exit_reason, exit_price = await should_exit_position(
+                        position, current_yes_price, current_no_price, market_status, market_result
+                    )
 
                 if should_exit:
                     logger.info(
@@ -276,15 +332,14 @@ async def run_tracking(
                             continue
 
                         from src.jobs.execute import place_sell_limit_order
-                        # live_mode=False → paper simulate (no CLOB call). Even if
-                        # DB still has stale live=1 rows from older paper runs,
-                        # settings gate prevents real sells.
+                        # Aggressive retries + market FOK fallback for live exits
                         sell_ok = await place_sell_limit_order(
                             position=position,
                             limit_price=exit_price,
                             db_manager=db_manager,
                             polymarket_client=polymarket_client,
                             live_mode=live_mode,
+                            aggressive=True,
                         )
                         if not sell_ok:
                             logger.error(
