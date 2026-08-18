@@ -52,4 +52,5 @@ async def test_ingest_registers_token_ids_on_polymarket_client():
         neg_risk=True,
         tick_size=0.001,
     )
+    client.flush_token_cache.assert_called_once()
     db.upsert_markets.assert_awaited()

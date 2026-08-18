@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 
 from src.strategies.completeness_arb import evaluate_completeness
+from src.strategies.safe_compounder import nav_cents
 
 
 class TestCompletenessMath(unittest.TestCase):
@@ -31,6 +32,14 @@ class TestCompletenessMath(unittest.TestCase):
         ok, _, profit = evaluate_completeness(0.48, 0.495, 10, 10)
         self.assertTrue(ok)
         self.assertAlmostEqual(profit, 0.025, places=4)
+
+    def test_nav_sizing_source_matches_compounder(self):
+        cash, mtm, nav = nav_cents({"balance": 11346, "portfolio_value": 540})
+        self.assertEqual(nav, cash + mtm)
+        # Old display bug: `cash + (mtm or cash)` doubles cash when MTM is 0.
+        cash0, mtm0, nav0 = nav_cents({"balance": 11882, "portfolio_value": 0})
+        self.assertEqual(nav0, 11882)
+        self.assertEqual(cash0 + (mtm0 or cash0), 23764)
 
 
 if __name__ == "__main__":

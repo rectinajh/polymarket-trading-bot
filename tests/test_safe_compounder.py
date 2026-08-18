@@ -17,7 +17,11 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 
-from src.strategies.safe_compounder import SafeCompounder
+from src.strategies.safe_compounder import (
+    SafeCompounder,
+    estimate_true_no_prob,
+    nav_cents,
+)
 
 
 def _run(coro):
@@ -109,6 +113,9 @@ class TestSafeCompounderE2E(unittest.TestCase):
         def reg(cond, yes, no, neg_risk=False, tick_size=0.01):
             registered.append((cond, yes, no, neg_risk, tick_size))
         client.register_market = reg
+        client.flush_token_cache = MagicMock()
+        client.cancel_order = AsyncMock()
+        gamma.get_market = AsyncMock(return_value={"_end_ts": 0})
 
         place_calls: list[dict] = []
         async def fake_place(**kwargs):
@@ -122,26 +129,24 @@ class TestSafeCompounderE2E(unittest.TestCase):
         return compounder, client, registered, place_calls
 
     def test_dry_run_finds_no_opportunities_without_edge(self):
-        """YES at $0.05 but NO ask at $0.93 (1 - 0.07 yes_bid) → edge =
-        true_no_prob (~0.96) - 0.93 = 0.03 = MIN_EDGE. Borderline; NO ask
-        below MIN_NO_ASK=$0.80 should reject too. We test outright rejection
-        when YES bid is high (lowest_no_ask = 1 - yes_bid_high → low)."""
+        """YES last $0.05 → true_no=0.95. Real NO ask from the book is
+        1 - 0.50 = $0.50, which is below MIN_NO_ASK=$0.80, so reject."""
         markets = [_market(cond="0xa", yes_id="ya", no_id="na", yes_last=0.05)]
-        books = {"ya": _book(yes_bid=0.50)}  # → derived NO ask = 0.50, < 0.80 → reject
+        books = {"ya": _book(yes_bid=0.50)}  # real NO ask = 0.50 < 0.80 → reject
         c, client, registered, place = self._build_compounder(markets, books)
         c.dry_run = True
-        _run(c.run())
+        result = _run(c.run())
         self.assertEqual(len(registered), 1)         # market still got registered
         self.assertEqual(len(place), 0)              # but no order placed
+        self.assertEqual(result.get("placed", 0), 0)
+        self.assertGreater(result.get("rejects", {}).get("ask_below_min", 0), 0)
 
     def test_high_edge_no_opportunity_places_dry_order(self):
-        """YES at $0.03 (so true_no_prob ≈ 0.99) and NO ask = 1 - 0.05
-        (highest YES bid 0.05) = $0.95 → edge = 0.99 - 0.95 = $0.04 > MIN_EDGE
-        ($0.03). Should produce a candidate; in dry_run no real call but the
-        opportunity gets processed."""
+        """YES last $0.03 → true_no=0.97. Real NO ask = 1 - 0.07 = $0.93 →
+        edge = 0.04 ≥ MIN_EDGE ($0.02). Dry-run records a virtual fill."""
         markets = [_market(cond="0xb", yes_id="yb", no_id="nb",
-                           yes_last=0.03, days_to_expiry=0.5, volume=5000.0)]
-        books = {"yb": _book(yes_bid=0.07)}  # NO ask≈0.93 → edge≈0.06 > 0.05
+                           yes_last=0.03, days_to_expiry=5.0, volume=5000.0)]
+        books = {"yb": _book(yes_bid=0.07)}  # NO ask≈0.93 → edge=0.04 ≥ 0.02
         c, client, registered, place = self._build_compounder(markets, books)
         c.dry_run = True
         result = _run(c.run())
@@ -151,6 +156,88 @@ class TestSafeCompounderE2E(unittest.TestCase):
         self.assertEqual(len(place), 0)
         # Stats should show at least one placed-virtually opportunity
         self.assertGreaterEqual(result.get("placed", 0), 1)
+        self.assertEqual(result.get("nav_cents"), 10_000)
+
+    def test_live_places_fok_market_order(self):
+        """Live path must FOK the measured ask (type_=market), not rest 1¢ below."""
+        markets = [_market(cond="0xb", yes_id="yb", no_id="nb",
+                           yes_last=0.03, days_to_expiry=5.0)]
+        books = {"yb": _book(yes_bid=0.07)}
+        c, client, registered, place = self._build_compounder(markets, books)
+        result = _run(c.run())
+        self.assertGreaterEqual(result.get("placed", 0), 1)
+        self.assertEqual(len(place), 1)
+        self.assertEqual(place[0]["type_"], "market")
+        self.assertEqual(place[0]["side"], "no")
+        self.assertEqual(place[0]["action"], "buy")
+        self.assertEqual(place[0]["no_price"], 93)
+
+    def test_nav_sizing_uses_cash_plus_mtm(self):
+        """With MTM sitting on the book, size against cash+MTM, not MTM alone."""
+        markets = [_market(cond="0xb", yes_id="yb", no_id="nb",
+                           yes_last=0.03, days_to_expiry=5.0)]
+        books = {"yb": _book(yes_bid=0.07)}
+        c, client, registered, place = self._build_compounder(markets, books)
+        client.get_balance = AsyncMock(return_value={
+            "balance": 10_000,             # $100 cash
+            "portfolio_value": 555,        # ~$5.55 MTM — old bug sized off this
+            "address": "0xtest",
+        })
+        c.dry_run = True
+        result = _run(c.run())
+        self.assertGreaterEqual(result.get("placed", 0), 1)
+        # 5% of NAV $105.55 is ~$5.28; at $0.93 that is ≥1 contract.
+        # 5% of MTM-only $5.55 is $0.28 → 0 contracts after the floor was removed.
+        self.assertGreaterEqual(result.get("total_deployed", 0), 93)
+
+    def test_near_expiry_market_not_entered(self):
+        """New entries inside the force-exit window + 1h buffer are skipped."""
+        markets = [_market(cond="0xe", yes_id="ye", no_id="ne",
+                           yes_last=0.03, days_to_expiry=0.04)]  # ~1 hour
+        books = {"ye": _book(yes_bid=0.07)}
+        c, client, registered, place = self._build_compounder(markets, books)
+        c.dry_run = True
+        result = _run(c.run())
+        self.assertEqual(result.get("placed", 0), 0)
+        self.assertEqual(len(place), 0)
+
+    def test_fractional_existing_position_skipped(self):
+        """Open size of 0.7 must skip a new entry (do not int-truncate to 0)."""
+        markets = [_market(cond="0xb", yes_id="yb", no_id="nb",
+                           yes_last=0.03, days_to_expiry=5.0)]
+        books = {"yb": _book(yes_bid=0.07)}
+        c, client, registered, place = self._build_compounder(markets, books)
+        client.get_positions = AsyncMock(return_value={
+            "market_positions": [{
+                "ticker": "0xb",
+                "condition_id": "0xb",
+                "size": 0.7,
+                "side": "no",
+                "endDate": "2099-01-01T00:00:00Z",
+            }],
+        })
+        result = _run(c.run())
+        self.assertEqual(len(place), 0)
+        self.assertGreaterEqual(result.get("skipped_existing", 0), 1)
+
+    def test_inventory_force_exit_dry_run(self):
+        """Positions inside the 2h force-exit window are marked exited in dry-run."""
+        markets = [_market(cond="0xf", yes_id="yf", no_id="nf", yes_last=0.40)]
+        books = {"yf": _book(yes_bid=0.50)}
+        c, client, registered, place = self._build_compounder(markets, books)
+        client.get_positions = AsyncMock(return_value={
+            "market_positions": [{
+                "ticker": "0xf",
+                "condition_id": "0xf",
+                "size": 5,
+                "side": "no",
+                "endDate": "2020-01-01T00:00:00Z",
+            }],
+        })
+        c.dry_run = True
+        result = _run(c.run())
+        self.assertEqual(result.get("inventory_exited"), 1)
+        self.assertEqual(len(place), 0)
 
     def test_excluded_tag_market_dropped(self):
         """A market whose parent event has a sports tag should be filtered
@@ -181,6 +268,22 @@ class TestSafeCompounderE2E(unittest.TestCase):
         self.assertEqual(cond, "0xd")
         self.assertTrue(neg_risk)
         self.assertAlmostEqual(tick, 0.001)
+
+
+class TestSafeCompounderMath(unittest.TestCase):
+    def test_nav_cents_never_double_counts_cash(self):
+        cash, mtm, nav = nav_cents({"balance": 11882, "portfolio_value": 555})
+        self.assertEqual(cash, 11882)
+        self.assertEqual(mtm, 555)
+        self.assertEqual(nav, 12437)
+
+    def test_nav_cents_zero_mtm_is_cash(self):
+        cash, mtm, nav = nav_cents({"balance": 10000, "portfolio_value": 0})
+        self.assertEqual((cash, mtm, nav), (10000, 0, 10000))
+
+    def test_true_no_prob_has_no_time_boost(self):
+        self.assertAlmostEqual(estimate_true_no_prob(0.03, hours_to_expiry=1), 0.97)
+        self.assertAlmostEqual(estimate_true_no_prob(0.03, hours_to_expiry=720), 0.97)
 
 
 if __name__ == "__main__":

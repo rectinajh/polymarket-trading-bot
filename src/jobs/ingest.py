@@ -120,6 +120,8 @@ async def process_and_queue_markets(
 
     await db_manager.upsert_markets(markets_to_upsert)
     logger.info(f"Successfully upserted {len(markets_to_upsert)} markets.")
+    if polymarket_client is not None and hasattr(polymarket_client, "flush_token_cache"):
+        polymarket_client.flush_token_cache()
 
     # Apply the lightweight eligibility filter — heavier per-market filters
     # (Kelly sizing, edge thresholds, AI confidence) live downstream in

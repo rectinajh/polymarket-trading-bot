@@ -147,16 +147,21 @@ def _run_safe_compounder(
 
     async def _run_forever():
         cycle = 0
-        while True:
-            cycle += 1
-            print(f"\n──── Cycle {cycle} — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ────")
-            try:
-                await _run_once()
-            except Exception as exc:
-                # One bad cycle shouldn't kill the loop. Log and keep going.
-                print(f"Cycle {cycle} failed: {exc}. Continuing after {interval}s.")
-            print(f"\n⏳ Sleeping {interval}s before next cycle...")
-            await asyncio.sleep(interval)
+        async with build_polymarket_clients() as (client, gamma):
+            compounder = SafeCompounder(
+                client=client,
+                gamma=gamma,
+                dry_run=not live_mode,
+            )
+            while True:
+                cycle += 1
+                print(f"\n──── Cycle {cycle} — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ────")
+                try:
+                    await compounder.run()
+                except Exception as exc:
+                    print(f"Cycle {cycle} failed: {exc}. Continuing after {interval}s.")
+                print(f"\n⏳ Sleeping {interval}s before next cycle...")
+                await asyncio.sleep(interval)
 
     try:
         if loop:
@@ -196,18 +201,22 @@ def _run_conservative(
 
     async def _run_forever():
         cycle = 0
-        while True:
-            cycle += 1
-            print(
-                f"\n──── Conservative Cycle {cycle} — "
-                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ────"
-            )
-            try:
-                await _run_once()
-            except Exception as exc:
-                print(f"Cycle {cycle} failed: {exc}. Continuing after {interval}s.")
-            print(f"\n⏳ Sleeping {interval}s before next cycle...")
-            await asyncio.sleep(interval)
+        async with build_polymarket_clients() as (client, gamma):
+            sc = SafeCompounder(client=client, gamma=gamma, dry_run=not live_mode)
+            arb = CompletenessArb(client=client, gamma=gamma, dry_run=not live_mode)
+            while True:
+                cycle += 1
+                print(
+                    f"\n──── Conservative Cycle {cycle} — "
+                    f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ────"
+                )
+                try:
+                    await sc.run()
+                    await arb.run()
+                except Exception as exc:
+                    print(f"Cycle {cycle} failed: {exc}. Continuing after {interval}s.")
+                print(f"\n⏳ Sleeping {interval}s before next cycle...")
+                await asyncio.sleep(interval)
 
     try:
         if loop:

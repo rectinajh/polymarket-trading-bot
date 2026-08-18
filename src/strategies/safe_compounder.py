@@ -3,37 +3,29 @@ Safe Compounder Strategy — NO-side, edge-based, capital-efficient.
 
 STRATEGY:
 - NO side ONLY
-- Find near-certain outcomes (EV ~95-99¢)
-- Edge = estimated_true_prob - lowest_no_ask > MIN_EDGE
-- Lowest NO ask must be > MIN_NO_ASK ($0.80)
-- Place resting order at lowest_no_ask - 1¢ (maker trade, near-zero fees)
-- Position size: max 10% of portfolio value per position (Kelly optional)
-
-KEY INSIGHT: We estimate true probability dynamically:
-- YES last price is the primary signal (lower = more certain NO wins)
-- Time to expiry amplifies certainty (if YES is at 3¢ with 2 days left ≈ 99%)
-- Compare EV estimate to the actual NO ask price; trade only when edge > MIN_EDGE.
-
-Polymarket port: market discovery now goes through GammaClient. The original
-Polymarket `KX*` prefix skiplist is replaced by Polymarket tag exclusion (sports,
-awards, music, pop-culture etc.) — same intent, different mechanism. Edge
-math is exchange-agnostic and unchanged.
+- Find near-certain outcomes (YES last ≤ $0.20)
+- Edge = (1 - YES last) - real NO ask  (no time-to-expiry heuristic boost)
+- Real NO ask must be ≥ MIN_NO_ASK ($0.80)
+- Trade only when edge ≥ MIN_EDGE — FOK take the cheap ask (capture the
+  mispricing we measured). Do not rest 1¢ below the ask.
+- Position size: max 5% of NAV (cash + mark-to-market) per position
 
 Available via: python cli.py run --safe-compounder
 """
 
 import asyncio
 import logging
-import math
 import time
 import uuid
-from datetime import datetime, timezone, timedelta
+from collections import Counter
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
-import aiosqlite
-
 from src.clients.gamma_client import GammaClient
-from src.utils.market_quality import should_skip_market_title
+from src.utils.market_quality import (
+    FORCE_EXIT_HOURS_BEFORE_EXPIRY,
+    should_skip_market_title,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,14 +49,19 @@ SKIP_TITLE_PHRASES = [
     "mention", "say in", "speech mention", "address mention",
 ]
 
-# Thresholds (all in dollar format 0.00-1.00) — tightened post 2026-08 drawdown
+# Thresholds (dollar 0.00-1.00). MIN_EDGE is last-vs-ask gap, not a
+# time-heuristic boost — that boost maxed at 4¢ while the old 5¢ gate
+# made live scans return zero opportunities on efficient books.
 MIN_VOLUME = 5000
-MIN_NO_ASK = 0.80      # Lowest NO ask must be > $0.80
-MIN_EDGE = 0.05        # Edge (EV - price) must be > $0.05
-MAX_POSITION_PCT = 0.05    # Max 5% of portfolio per position (small-capital safe)
+MIN_NO_ASK = 0.80
+MIN_EDGE = 0.02
+MAX_POSITION_PCT = 0.05
 USE_KELLY = True
 MIN_CONFIDENCE = 0.5
-MIN_ASK_SIZE = 5.0         # Require real NO ask depth when available
+MIN_ASK_SIZE = 5.0
+# Do not open a new position that inventory management would immediately exit.
+MIN_HOURS_TO_ENTRY = FORCE_EXIT_HOURS_BEFORE_EXPIRY + 1.0
+BOOK_BATCH_SIZE = 8
 
 
 # -----------------------------------------------------------------------
@@ -95,43 +92,22 @@ def should_skip(market: Dict) -> bool:
     return False
 
 
-def estimate_true_no_prob(yes_last: float, hours_to_expiry: float) -> float:
-    """
-    Estimate the true probability that NO wins.
-    Returns estimated true NO probability in dollars (0.00-1.00).
-    """
-    base_prob = 1.0 - yes_last
+def estimate_true_no_prob(yes_last: float, hours_to_expiry: float = 0.0) -> float:
+    """Implied NO probability from YES last. No time-to-expiry boost.
 
-    if hours_to_expiry <= 0:
-        return base_prob
+    ``hours_to_expiry`` is kept for call-site compatibility; it is not used.
+    Adding 1–4¢ of uncalibrated certainty made MIN_EDGE look earned when the
+    book was already efficient.
+    """
+    del hours_to_expiry
+    return max(0.0, min(1.0, 1.0 - yes_last))
 
-    if hours_to_expiry <= 24:
-        if yes_last <= 0.05:
-            return min(0.99, base_prob + 0.04)
-        elif yes_last <= 0.10:
-            return min(0.98, base_prob + 0.03)
-        elif yes_last <= 0.15:
-            return min(0.97, base_prob + 0.02)
-        else:
-            return min(0.96, base_prob + 0.01)
-    elif hours_to_expiry <= 72:
-        if yes_last <= 0.05:
-            return min(0.99, base_prob + 0.03)
-        elif yes_last <= 0.10:
-            return min(0.97, base_prob + 0.02)
-        else:
-            return base_prob + 0.01
-    elif hours_to_expiry <= 168:
-        if yes_last <= 0.05:
-            return min(0.98, base_prob + 0.02)
-        elif yes_last <= 0.10:
-            return min(0.96, base_prob + 0.01)
-        else:
-            return base_prob
-    else:
-        if yes_last <= 0.03:
-            return min(0.97, base_prob + 0.01)
-        return base_prob
+
+def nav_cents(bal: Dict) -> Tuple[int, int, int]:
+    """Return (cash_cents, mtm_cents, nav_cents). Never double-count cash."""
+    cash = int(bal.get("balance", 0) or 0)
+    mtm = int(bal.get("portfolio_value", 0) or 0)
+    return cash, mtm, cash + mtm
 
 
 def kelly_fraction(prob_win: float, payout_ratio: float) -> float:
@@ -309,28 +285,26 @@ class SafeCompounder:
         start = time.time()
 
         logger.info("=" * 70)
-        logger.info("SAFE COMPOUNDER v5 — EDGE-BASED NO-SIDE")
+        logger.info("SAFE COMPOUNDER v6 — LAST-VS-ASK NO-SIDE (FOK)")
         logger.info(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         logger.info(
-            "Rules: NO only | ask > $%.2f | edge > $%.2f | max %.0f%%/position | maker orders",
+            "Rules: NO only | real ask ≥ $%.2f | last-vs-ask edge ≥ $%.2f | "
+            "max %.0f%% NAV/position | FOK take ask",
             self.min_no_ask, self.min_edge, self.max_position_pct * 100,
         )
         logger.info("=" * 70)
 
-        # Get portfolio state. PolymarketClient.get_balance() reports USDC.e
-        # cash; mark-to-market on open positions is not yet computed (returns 0
-        # for portfolio_value). Fall back to cash balance for sizing so the
-        # strategy still works on a fresh wallet.
         bal = await self.client.get_balance()
-        cash = bal.get("balance", 0)
-        portfolio = bal.get("portfolio_value", 0) or cash
+        cash, mtm, nav = nav_cents(bal)
 
-        print(f"\n💰 Cash: ${cash/100:.2f} | Portfolio (sizing basis): ${portfolio/100:.2f} | "
-              f"Total: ${(cash+portfolio)/100:.2f}\n", flush=True)
+        print(
+            f"\n💰 Cash: ${cash/100:.2f} | MTM: ${mtm/100:.2f} | "
+            f"NAV (sizing): ${nav/100:.2f}\n",
+            flush=True,
+        )
 
-        # Step 0: Cancel legacy YES orders (no-op on a fresh Polymarket wallet
-        # but kept for parity with the Polymarket version when migrating).
-        print("🧹 Step 0: Cancel legacy YES orders...", flush=True)
+        print("🧹 Step 0: Inventory + cancel legacy YES orders...", flush=True)
+        inv_stats = await self.manage_inventory()
         cancelled = await self._cancel_yes_orders()
 
         # Step 1: Fetch all markets
@@ -344,7 +318,7 @@ class SafeCompounder:
 
         # Step 3: Orderbook + edge check
         print(f"\n📊 Step 3: Checking orderbooks for edge ≥ ${self.min_edge:.2f}...", flush=True)
-        opportunities = await self._check_orderbook_and_price(candidates)
+        opportunities, rejects = await self._check_orderbook_and_price(candidates)
 
         # Display top opportunities
         sorted_opps = sorted(
@@ -353,7 +327,7 @@ class SafeCompounder:
         print(f"\n📋 Top Opportunities:", flush=True)
         for opp in sorted_opps[:20]:
             print(
-                f"  NO ask:${opp['lowest_no_ask']:.2f} → our:${opp['our_price']:.2f} | "
+                f"  NO ask:${opp['lowest_no_ask']:.2f} FOK | "
                 f"EV:${opp['true_no_prob']:.2f} edge:${opp['edge']:.2f} | "
                 f"YES@${opp['yes_last']:.2f} | {opp['roi_pct']:.1f}% "
                 f"({opp['annualized_roi']:.0f}%ann) | "
@@ -362,12 +336,20 @@ class SafeCompounder:
             )
             print(f"    {opp['title']}", flush=True)
 
-        # Step 4: Place orders
-        print(f"\n🚀 Step 4: Placing maker orders (ask - $0.01)...", flush=True)
-        stats = await self._place_resting_orders(sorted_opps, portfolio, cash)
+        reject_txt = " ".join(f"{k}={v}" for k, v in sorted(rejects.items()) if v)
+        if reject_txt:
+            print(f"  Rejects: {reject_txt}", flush=True)
+            logger.info("Orderbook rejects: %s", reject_txt)
+
+        # Step 4: Take cheap asks
+        print(f"\n🚀 Step 4: FOK taking cheap NO asks...", flush=True)
+        stats = await self._place_resting_orders(sorted_opps, nav, cash)
 
         elapsed = time.time() - start
+        if hasattr(self.client, "flush_token_cache"):
+            self.client.flush_token_cache()
         bal = await self.client.get_balance()
+        cash_end, mtm_end, nav_end = nav_cents(bal)
         # Lifecycle: close the gamma session if we created it ourselves.
         if self._owns_gamma:
             try:
@@ -380,19 +362,24 @@ class SafeCompounder:
         print(f"{'='*70}", flush=True)
         print(f"  Markets scanned:      {len(markets)}", flush=True)
         print(f"  NO candidates:        {len(candidates)}", flush=True)
-        print(f"  With edge > ${self.min_edge:.2f}:      {len(opportunities)}", flush=True)
+        print(f"  With edge ≥ ${self.min_edge:.2f}:     {len(opportunities)}", flush=True)
         print(f"  Orders placed:        {stats['placed']}", flush=True)
         print(f"  Instantly filled:     {stats['filled']}", flush=True)
         print(f"  Skipped (existing):   {stats['skipped_existing']}", flush=True)
         print(f"  Errors:               {stats['errors']}", flush=True)
         print(f"  Capital deployed:     ${stats['total_deployed']/100:.2f}", flush=True)
         print(f"  Potential profit:     ${stats['total_potential_profit']/100:.2f}", flush=True)
+        print(f"  Inventory exits:      {inv_stats.get('exited', 0)}", flush=True)
         print(f"  YES orders cancelled: {cancelled}", flush=True)
-        print(f"  Cash:                 ${bal.get('balance', 0)/100:.2f}", flush=True)
-        print(f"  Portfolio:            ${bal.get('portfolio_value', 0)/100:.2f}", flush=True)
+        print(f"  Cash:                 ${cash_end/100:.2f}", flush=True)
+        print(f"  MTM:                  ${mtm_end/100:.2f}", flush=True)
+        print(f"  NAV:                  ${nav_end/100:.2f}", flush=True)
         print(f"  Elapsed:              {elapsed:.0f}s", flush=True)
         print(f"{'='*70}\n", flush=True)
 
+        stats["rejects"] = dict(rejects)
+        stats["nav_cents"] = nav_end
+        stats["inventory_exited"] = inv_stats.get("exited", 0)
         return stats
 
     async def _fetch_all_markets(self) -> List[Dict]:
@@ -462,6 +449,8 @@ class SafeCompounder:
 
         logger.info("Fetched %d markets after server+client filter (from %d raw)",
                     len(filtered), len(markets))
+        if hasattr(self.client, "flush_token_cache"):
+            self.client.flush_token_cache()
         return filtered
 
     def _find_no_candidates(self, markets: List[Dict]) -> List[Dict]:
@@ -500,7 +489,7 @@ class SafeCompounder:
 
             end_ts = m.get("_end_ts") or 0
             hours_to_expiry = max(0.0, (end_ts - now_ts) / 3600) if end_ts else 720.0
-            if hours_to_expiry <= 0:
+            if hours_to_expiry <= MIN_HOURS_TO_ENTRY:
                 continue
 
             true_no_prob = estimate_true_no_prob(yes_last, hours_to_expiry)
@@ -534,38 +523,31 @@ class SafeCompounder:
         
         return candidates
 
-    async def _check_orderbook_and_price(self, candidates: List[Dict]) -> List[Dict]:
-        """Check orderbooks and find trades with sufficient edge."""
-        opportunities = []
+    async def _check_orderbook_and_price(
+        self, candidates: List[Dict]
+    ) -> Tuple[List[Dict], Counter]:
+        """Check real NO asks; only trade last-vs-ask edge on live liquidity."""
+        opportunities: List[Dict] = []
+        rejects: Counter = Counter()
 
-        for i, m in enumerate(candidates):
+        async def _one(m: Dict) -> Tuple[Optional[Dict], str]:
             ticker = m["ticker"]
             true_no_prob = m["_true_no_prob"]
-
             try:
                 ob_resp = await self.client.get_orderbook(ticker, depth=10)
-                # Handle both new and old orderbook formats
-                ob = ob_resp.get("orderbook_fp", ob_resp.get("orderbook", {}))
-                # No extra sleep — client already has 0.5s rate limiter
-                if (i + 1) % 50 == 0:
-                    logger.info("Orderbook progress: %d/%d checked", i + 1, len(candidates))
+                ob = ob_resp.get("orderbook_fp", ob_resp.get("orderbook", {})) or {}
             except Exception as e:
-                logger.debug("Orderbook fetch failed for %s: %s", ticker, e)
-                continue
+                logger.info("Orderbook fetch failed for %s: %s", ticker[:18], e)
+                return None, "disconnect"
 
-            conf_score, conf_reason = market_confidence_score(ticker, ob, m)
+            if not ob:
+                return None, "empty_book"
+
+            conf_score, _conf_reason = market_confidence_score(ticker, ob, m)
             if conf_score < self.min_confidence:
-                logger.debug(
-                    "Low confidence (%.2f) %s — %s", conf_score, ticker, conf_reason
-                )
-                continue
+                return None, "low_conf"
 
-            # Handle both new and old orderbook formats
-            yes_bids = ob.get("yes_dollars", ob.get("yes", []))
-            no_bids = ob.get("no_dollars", ob.get("no", []))
             no_asks = ob.get("no_asks", []) or []
-
-            # Prefer real NO asks (actual sell liquidity) when present.
             lowest_no_ask = None
             no_ask_size = 0.0
             if no_asks:
@@ -583,59 +565,38 @@ class SafeCompounder:
                 except (ValueError, TypeError, IndexError):
                     lowest_no_ask = None
 
-            if lowest_no_ask is None and yes_bids:
-                try:
-                    highest_yes_bid = max(float(b[0]) for b in yes_bids)
-                    # Convert cents to dollars if needed
-                    if highest_yes_bid > 1.0:
-                        highest_yes_bid = highest_yes_bid / 100.0
-                    lowest_no_ask = 1.0 - highest_yes_bid
-                    no_ask_size = MIN_ASK_SIZE  # derived — treat as meeting min size
-                except (ValueError, TypeError):
-                    pass
-
-            best_no_bid = 0
-            if no_bids:
-                try:
-                    best_no_bid = max(float(b[0]) for b in no_bids)
-                    # Convert cents to dollars if needed
-                    if best_no_bid > 1.0:
-                        best_no_bid = best_no_bid / 100.0
-                except (ValueError, TypeError):
-                    pass
-
-            if lowest_no_ask is None and best_no_bid > 0:
-                lowest_no_ask = best_no_bid + 0.02  # 2¢ = $0.02
-                no_ask_size = MIN_ASK_SIZE
-
+            # Only real NO asks count. Derived (1 - YES bid) is not a takeable price.
             if lowest_no_ask is None:
-                continue
-
+                return None, "no_real_ask"
             if no_ask_size < MIN_ASK_SIZE:
-                continue
-
+                return None, "thin_ask"
             if lowest_no_ask < self.min_no_ask:
-                continue
+                return None, "ask_below_min"
 
             edge = true_no_prob - lowest_no_ask
             if edge < self.min_edge:
-                continue
+                return None, "edge_lt_min"
 
-            our_price = lowest_no_ask - 0.01  # 1¢ = $0.01
-            if our_price < self.min_no_ask:
-                continue
-
+            our_price = lowest_no_ask
             profit_per_contract = 1.0 - our_price
-            roi_pct = profit_per_contract / our_price * 100
+            roi_pct = profit_per_contract / our_price * 100 if our_price else 0.0
             days = m["_days_to_expiry"] if m["_days_to_expiry"] > 0 else 1
             annualized_roi = (profit_per_contract / our_price) * (365 / days) * 100
 
-            yes_last_val = float(m.get("last_price_dollars", 0) or m.get("last_price", 0) or 0)
-            # Convert cents to dollars if needed
-            if yes_last_val > 1.0:
-                yes_last_val = yes_last_val / 100.0
-            
-            opportunities.append({
+            outcome_prices = m.get("_outcome_prices") or (0.0, 0.0)
+            yes_last_val = float(outcome_prices[0]) if outcome_prices else 0.0
+
+            best_no_bid = 0.0
+            no_bids = ob.get("no_dollars", ob.get("no", [])) or []
+            if no_bids:
+                try:
+                    best_no_bid = max(float(b[0]) for b in no_bids)
+                    if best_no_bid > 1.0:
+                        best_no_bid = best_no_bid / 100.0
+                except (ValueError, TypeError):
+                    best_no_bid = 0.0
+
+            opp = {
                 "ticker": ticker,
                 "title": m.get("title", "")[:70],
                 "side": "no",
@@ -649,31 +610,49 @@ class SafeCompounder:
                 "annualized_roi": annualized_roi,
                 "volume": int(float(m.get("volume_fp", 0) or m.get("volume", 0) or 0)),
                 "days_to_expiry": m["_days_to_expiry"],
-                "close_time": m.get("close_time", "")[:10],
+                "close_time": (m.get("close_time") or "")[:10],
                 "best_no_bid": best_no_bid,
-            })
+                "capture": "taker",
+            }
+            return opp, "ok"
 
-            if (i + 1) % 25 == 0:
-                logger.info(
-                    "Checked %d/%d orderbooks, %d viable",
-                    i + 1, len(candidates), len(opportunities),
-                )
+        for start in range(0, len(candidates), BOOK_BATCH_SIZE):
+            batch = candidates[start:start + BOOK_BATCH_SIZE]
+            results = await asyncio.gather(*[_one(m) for m in batch], return_exceptions=True)
+            for i, result in enumerate(results):
+                done = start + i + 1
+                if isinstance(result, Exception):
+                    rejects["disconnect"] += 1
+                    logger.info("Orderbook batch error: %s", result)
+                    continue
+                opp, reason = result
+                if opp:
+                    opportunities.append(opp)
+                else:
+                    rejects[reason] += 1
+                if done % 50 == 0:
+                    logger.info(
+                        "Orderbook progress: %d/%d checked, %d viable",
+                        done, len(candidates), len(opportunities),
+                    )
 
         logger.info(
-            "%d opportunities with edge > $%.2f", len(opportunities), self.min_edge
+            "%d opportunities with last-vs-ask edge ≥ $%.2f",
+            len(opportunities), self.min_edge,
         )
-        return opportunities
+        return opportunities, rejects
 
     async def _place_resting_orders(
         self, opportunities: List[Dict], portfolio: int, cash: int
     ) -> Dict:
-        """Place NO-side resting orders at lowest_ask - 1¢."""
-        # Get existing positions and orders
+        """FOK-take cheap NO asks. `portfolio` is NAV in cents."""
         try:
             positions_resp = await self.client.get_positions()
             positions = positions_resp.get("market_positions", [])
             pos_tickers = {
-                p["ticker"] for p in positions if abs(p.get("position", 0)) > 0
+                (p.get("ticker") or p.get("condition_id"))
+                for p in positions
+                if abs(float(p.get("size", 0) or 0)) > 0
             }
         except Exception:
             pos_tickers = set()
@@ -681,7 +660,7 @@ class SafeCompounder:
         try:
             orders_resp = await self.client.get_orders(status="resting")
             existing_orders = orders_resp.get("orders", [])
-            ord_tickers = {o["ticker"] for o in existing_orders}
+            ord_tickers = {o.get("ticker") for o in existing_orders if o.get("ticker")}
         except Exception:
             ord_tickers = set()
 
@@ -696,13 +675,14 @@ class SafeCompounder:
         }
 
         print(
-            f"\n{'='*70}\nPLACING MAKER ORDERS — Portfolio: ${portfolio/100:.2f} | "
+            f"\n{'='*70}\nFOK TAKE NO ASKS — NAV: ${portfolio/100:.2f} | "
             f"Cash: ${cash/100:.2f} | {'DRY RUN' if self.dry_run else 'LIVE'}\n"
-            f"Max per position: ${portfolio * self.max_position_pct / 100:.2f} ({self.max_position_pct*100:.0f}%)\n"
+            f"Max per position: ${portfolio * self.max_position_pct / 100:.2f} ({self.max_position_pct*100:.0f}% of NAV)\n"
             f"{'='*70}\n",
             flush=True,
         )
 
+        remaining_cash = cash
         for opp in opportunities:
             ticker = opp["ticker"]
 
@@ -710,26 +690,28 @@ class SafeCompounder:
                 stats["skipped_existing"] += 1
                 continue
 
-            contracts = self._calculate_position_size(opp, portfolio, cash)
+            contracts = self._calculate_position_size(opp, portfolio, remaining_cash)
             if contracts < 1:
                 stats["skipped_size"] += 1
                 continue
 
             price = opp["our_price"]
-            cost = contracts * price * 100  # Convert dollars to cents for cost calculation
-            profit = contracts * opp["profit"] * 100  # Convert dollars to cents for profit calculation
+            cost = contracts * price * 100
+            profit = contracts * opp["profit"] * 100
+            if cost > remaining_cash:
+                stats["skipped_size"] += 1
+                continue
 
             if self.dry_run:
                 kelly_info = ""
                 if self.use_kelly:
-                    true_prob = opp["true_no_prob"]  # Already in 0-1 format
-                    odds = (1.0 - price) / price  # Dollar format
+                    true_prob = opp["true_no_prob"]
+                    odds = (1.0 - price) / price if price else 0.0
                     kf = kelly_fraction(true_prob, odds)
                     kelly_info = f" kelly:{kf:.1%}"
                 print(
-                    f"  🏷️ [DRY] NO x{contracts} @ ${price:.2f} | "
-                    f"ask:${opp['lowest_no_ask']:.2f} EV:${opp['true_no_prob']:.2f} "
-                    f"edge:${opp['edge']:.2f} | "
+                    f"  [DRY] FOK NO x{contracts} @ ${price:.2f} | "
+                    f"EV:${opp['true_no_prob']:.2f} edge:${opp['edge']:.2f} | "
                     f"+${profit/100:.2f} ({opp['roi_pct']:.1f}% / {opp['annualized_roi']:.0f}%ann) | "
                     f"{opp['days_to_expiry']}d{kelly_info}",
                     flush=True,
@@ -738,11 +720,12 @@ class SafeCompounder:
                 stats["placed"] += 1
                 stats["total_potential_profit"] += profit
                 stats["total_deployed"] += cost
+                remaining_cash -= int(cost)
+                pos_tickers.add(ticker)
                 continue
 
             try:
-                # Convert dollar price to cents for API call
-                price_cents = int(price * 100)
+                price_cents = int(round(price * 100))
                 client_order_id = str(uuid.uuid4())
                 r = await self.client.place_order(
                     ticker=ticker,
@@ -750,6 +733,7 @@ class SafeCompounder:
                     side="no",
                     action="buy",
                     count=contracts,
+                    type_="market",
                     no_price=price_cents,
                 )
                 order = r.get("order", {})
@@ -759,13 +743,13 @@ class SafeCompounder:
                 if filled > 0:
                     stats["filled"] += filled
                     print(
-                        f"  🎯 FILLED NO x{filled}/{contracts} @ ${price:.2f} | "
+                        f"  FILLED NO x{filled}/{contracts} @ ${price:.2f} | "
                         f"edge:${opp['edge']:.2f} +${filled * opp['profit']/100:.2f} | {ticker}",
                         flush=True,
                     )
                 else:
                     print(
-                        f"  ✅ NO x{contracts} @ ${price:.2f} | {status} | "
+                        f"  NO x{contracts} @ ${price:.2f} | {status} | "
                         f"edge:${opp['edge']:.2f} {opp['roi_pct']:.1f}% | {ticker}",
                         flush=True,
                     )
@@ -773,11 +757,12 @@ class SafeCompounder:
                 stats["placed"] += 1
                 stats["total_potential_profit"] += profit
                 stats["total_deployed"] += cost
-                ord_tickers.add(ticker)
+                remaining_cash -= int(cost)
+                pos_tickers.add(ticker)
                 await asyncio.sleep(0.2)
 
             except Exception as e:
-                print(f"  ❌ {ticker}: {e}", flush=True)
+                print(f"  {ticker}: {e}", flush=True)
                 stats["errors"] += 1
                 await asyncio.sleep(0.3)
 
@@ -799,10 +784,16 @@ class SafeCompounder:
             position_value = max_position_value
 
         # Convert price to cents for position calculation
-        price_cents = int(price * 100)
-        contracts = max(1, position_value // price_cents)
+        price_cents = int(round(price * 100))
+        if price_cents <= 0:
+            return 0
+        contracts = position_value // price_cents
         contracts = min(contracts, 200)
-        return contracts
+        if contracts < 1:
+            return 0
+        if contracts * price_cents > cash:
+            contracts = cash // price_cents
+        return max(0, contracts)
 
     async def _cancel_yes_orders(self) -> int:
         """Cancel any resting YES-side orders (legacy)."""
@@ -838,14 +829,103 @@ class SafeCompounder:
             logger.error("Error cancelling YES orders: %s", e)
             return 0
 
+    async def manage_inventory(self) -> Dict:
+        """Exit positions inside the force-exit window. Conservative has no
+        other stop/profit path, so near-expiry inventory must not sit unattended.
+        """
+        stats = {"checked": 0, "exited": 0, "errors": 0, "no_book": 0}
+        try:
+            positions_resp = await self.client.get_positions()
+            positions = positions_resp.get("market_positions", []) or []
+        except Exception as exc:
+            logger.warning("Inventory: get_positions failed: %s", exc)
+            print("  Inventory: could not load positions.", flush=True)
+            return stats
+
+        now_ts = datetime.now(timezone.utc).timestamp()
+        open_pos = [p for p in positions if abs(float(p.get("size", 0) or 0)) > 0]
+        if not open_pos:
+            print("  No open positions to manage.", flush=True)
+            return stats
+
+        for pos in open_pos:
+            stats["checked"] += 1
+            cond = pos.get("condition_id") or pos.get("ticker") or ""
+            side = (pos.get("side") or "").lower()
+            size = float(pos.get("size", 0) or 0)
+            qty = int(round(size))
+            if not cond or qty < 1 or side not in ("yes", "no"):
+                continue
+
+            hours_left = await self._hours_to_expiry(pos, cond, now_ts)
+            if hours_left is None:
+                logger.info("Inventory: no expiry for %s — leave in place", cond[:18])
+                continue
+            if hours_left > FORCE_EXIT_HOURS_BEFORE_EXPIRY:
+                continue
+
+            print(
+                f"  Near expiry ({hours_left:.1f}h): selling {qty} {side.upper()} {cond[:18]}…",
+                flush=True,
+            )
+            if self.dry_run:
+                stats["exited"] += 1
+                continue
+            try:
+                book_resp = await self.client.get_orderbook(cond, depth=1)
+                book = book_resp.get("orderbook", {}) or {}
+                bids = book.get(side, []) or []
+                if not bids:
+                    stats["no_book"] += 1
+                    logger.warning("Inventory: no %s bid for %s", side, cond[:18])
+                    continue
+                best_bid = max(float(level[0]) for level in bids)
+                if best_bid > 1.0:
+                    best_bid = best_bid / 100.0
+                price_cents = int(round(best_bid * 100))
+                await self.client.place_order(
+                    ticker=cond,
+                    client_order_id=str(uuid.uuid4()),
+                    side=side,
+                    action="sell",
+                    count=qty,
+                    type_="market",
+                    yes_price=price_cents if side == "yes" else None,
+                    no_price=price_cents if side == "no" else None,
+                )
+                stats["exited"] += 1
+            except Exception as exc:
+                stats["errors"] += 1
+                logger.warning("Inventory exit failed %s: %s", cond[:18], exc)
+        return stats
+
+    async def _hours_to_expiry(self, pos: Dict, cond: str, now_ts: float) -> Optional[float]:
+        for key in ("endDate", "end_date", "expiration", "endDateIso"):
+            raw = pos.get(key)
+            if not raw:
+                continue
+            try:
+                if isinstance(raw, (int, float)) and raw > 1e9:
+                    return max(0.0, (float(raw) - now_ts) / 3600)
+                ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+                return max(0.0, (ts - now_ts) / 3600)
+            except (TypeError, ValueError, OSError):
+                continue
+        try:
+            meta = await self.gamma.get_market(cond)
+            end_ts = float(meta.get("_end_ts") or 0)
+            if end_ts:
+                return max(0.0, (end_ts - now_ts) / 3600)
+        except Exception:
+            pass
+        return None
+
     async def check_fills(self) -> None:
         """Check recent fills and resting orders."""
         bal = await self.client.get_balance()
-        portfolio = bal.get("portfolio_value", 0)
-        cash = bal.get("balance", 0)
+        cash, mtm, nav = nav_cents(bal)
         print(
-            f"💰 Cash: ${cash/100:.2f} | Portfolio: ${portfolio/100:.2f} | "
-            f"Total: ${(cash+portfolio)/100:.2f}",
+            f"💰 Cash: ${cash/100:.2f} | MTM: ${mtm/100:.2f} | NAV: ${nav/100:.2f}",
             flush=True,
         )
 

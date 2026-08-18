@@ -230,7 +230,7 @@ class PolymarketClient(TradingLoggerMixin):
         self._api_creds_set = False
 
         # condition_id → TokenIds. Loaded from disk if a previous run wrote
-        # one; written back lazily after each register_market call so the next
+        # one; written back on flush_token_cache() / close() so the next
         # process start finds an already-warm cache (avoids the Gamma round-
         # trip that would otherwise hit on every cold-start order).
         self._token_cache_path = (
@@ -238,6 +238,8 @@ class PolymarketClient(TradingLoggerMixin):
             else DEFAULT_TOKEN_CACHE_PATH
         )
         self._token_cache: Dict[str, TokenIds] = self._load_token_cache()
+        self._token_cache_dirty = False
+        self._ob_sema = asyncio.Semaphore(8)
         self._gamma = gamma_client
         self._geoblocked = False
         self._geoblock_status: Optional[Dict[str, Any]] = None
@@ -423,16 +425,21 @@ class PolymarketClient(TradingLoggerMixin):
         forwarded to the SDK on order placement — getting either wrong is the
         most common cause of "invalid order" rejections from the CLOB.
 
-        The updated cache is persisted to disk asynchronously so the next
-        process start sees the same metadata without re-hitting Gamma.
+        Persistence is deferred — call :meth:`flush_token_cache` once per
+        scan (not per market). Writing the full JSON on every register was
+        taking ~2.5 minutes per 2000-market cycle.
         """
-        self._token_cache[condition_id] = TokenIds(
+        incoming = TokenIds(
             yes=str(yes_token_id),
             no=str(no_token_id),
             neg_risk=bool(neg_risk),
             tick_size=float(tick_size or 0.01),
         )
-        self._save_token_cache()
+        existing = self._token_cache.get(condition_id)
+        if existing == incoming:
+            return
+        self._token_cache[condition_id] = incoming
+        self._token_cache_dirty = True
 
     def _load_token_cache(self) -> Dict[str, TokenIds]:
         """Read the persisted condition_id → TokenIds map. Returns {} on any
@@ -460,6 +467,12 @@ class PolymarketClient(TradingLoggerMixin):
                 continue
         return out
 
+    def flush_token_cache(self) -> None:
+        """Persist dirty token-id cache once. Safe to call if nothing changed."""
+        if not self._token_cache_dirty:
+            return
+        self._save_token_cache()
+
     def _save_token_cache(self) -> None:
         """Write the cache to disk. Best-effort — never raises into callers
         because token_id resolution still works in-memory if persistence fails."""
@@ -472,6 +485,7 @@ class PolymarketClient(TradingLoggerMixin):
             tmp = path.with_suffix(path.suffix + ".tmp")
             tmp.write_text(json.dumps(serializable, sort_keys=True), encoding="utf-8")
             tmp.replace(path)
+            self._token_cache_dirty = False
         except OSError:
             pass
 
@@ -859,10 +873,11 @@ class PolymarketClient(TradingLoggerMixin):
         """
         ids = await self._ensure_token_ids(condition_id)
 
-        yes_book, no_book = await asyncio.gather(
-            self._fetch_book_one(ids.yes, depth=depth),
-            self._fetch_book_one(ids.no, depth=depth),
-        )
+        async with self._ob_sema:
+            yes_book, no_book = await asyncio.gather(
+                self._fetch_book_one(ids.yes, depth=depth),
+                self._fetch_book_one(ids.no, depth=depth),
+            )
         return {
             "orderbook": {
                 "yes":      _bids_to_levels(yes_book),
@@ -1293,9 +1308,9 @@ class PolymarketClient(TradingLoggerMixin):
     # ------------------------------------------------------------------
 
     async def close(self) -> None:
-        """No-op for parity with PolymarketClient. py-clob-client does not hold
-        a long-lived HTTP session that needs explicit shutdown."""
-        self.logger.info("PolymarketClient closed (no-op)")
+        """Flush token cache; py-clob-client does not hold a session to close."""
+        self.flush_token_cache()
+        self.logger.info("PolymarketClient closed")
 
     async def __aenter__(self):
         return self

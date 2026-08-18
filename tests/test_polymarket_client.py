@@ -349,7 +349,13 @@ class TestPlaceOrder(unittest.TestCase):
             c1.register_market("0xa", "y", "n", neg_risk=True, tick_size=0.01)
             c1.register_market("0xb", "y2", "n2", neg_risk=False, tick_size=0.001)
 
+            # Dirty writes stay in memory until an explicit flush (or close).
+            self.assertFalse(cache_path.exists())
+            c1.flush_token_cache()
             self.assertTrue(cache_path.exists())
+
+            c1.register_market("0xa", "y", "n", neg_risk=True, tick_size=0.01)
+            self.assertFalse(c1._token_cache_dirty)
 
             # Fresh client reading the same path should see both entries
             c2 = PolymarketClient(private_key=DUMMY_PK, token_cache_path=cache_path)

@@ -15,10 +15,12 @@ import asyncio
 import logging
 import time
 import uuid
+from collections import Counter
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.clients.gamma_client import GammaClient
+from src.strategies.safe_compounder import nav_cents
 from src.utils.market_quality import should_skip_market_title
 
 logger = logging.getLogger(__name__)
@@ -28,9 +30,10 @@ MAX_COMBINED_ASK = 0.98
 MIN_PROFIT_PER_SHARE = 0.02  # 1 - combined >= this
 MIN_VOLUME = 5000.0
 MAX_SHARES_PER_TRADE = 20
-MAX_NOTIONAL_PCT = 0.02  # 2% of portfolio cash+positions (cents basis uses cash)
+MAX_NOTIONAL_PCT = 0.02  # 2% of NAV
 MAX_MARKETS_TO_CHECK = 150
 MIN_ASK_SIZE = 5.0
+BOOK_BATCH_SIZE = 8
 
 
 def _best_ask(levels: List) -> Tuple[Optional[float], float]:
@@ -122,9 +125,8 @@ class CompletenessArb:
         )
 
         bal = await self.client.get_balance()
-        cash = int(bal.get("balance", 0) or 0)
-        portfolio = int(bal.get("portfolio_value", 0) or 0) or cash
-        max_notional_cents = max(100, int(portfolio * MAX_NOTIONAL_PCT))
+        cash, mtm, nav = nav_cents(bal)
+        max_notional_cents = max(100, int(nav * MAX_NOTIONAL_PCT))
 
         markets = await self.gamma.get_markets(
             active=True,
@@ -168,14 +170,15 @@ class CompletenessArb:
         print(f"   Checking books on {len(candidates)} liquid markets...", flush=True)
 
         opps: List[Dict] = []
-        for i, m in enumerate(candidates):
+        rejects: Counter = Counter()
+
+        async def _one(m: Dict) -> Tuple[Optional[Dict], str]:
             try:
                 ob_resp = await self.client.get_orderbook(m["ticker"], depth=5)
-                ob = ob_resp.get("orderbook", {})
-                stats["checked_books"] += 1
+                ob = ob_resp.get("orderbook", {}) or {}
             except Exception as exc:
-                logger.debug("book fail %s: %s", m["ticker"], exc)
-                continue
+                logger.info("book fail %s: %s", m["ticker"][:18], exc)
+                return None, "disconnect"
 
             yes_ask, yes_sz = _best_ask(ob.get("yes_asks") or [])
             no_ask, no_sz = _best_ask(ob.get("no_asks") or [])
@@ -188,7 +191,7 @@ class CompletenessArb:
                 min_profit=self.min_profit,
             )
             if not ok or yes_ask is None or no_ask is None:
-                continue
+                return None, reason.split("=")[0] if reason else "fail"
 
             shares = int(min(yes_sz, no_sz, MAX_SHARES_PER_TRADE))
             cost_cents = int(round((yes_ask + no_ask) * shares * 100))
@@ -202,9 +205,9 @@ class CompletenessArb:
                     ),
                 )
             if shares < 1:
-                continue
+                return None, "size"
 
-            opps.append({
+            return {
                 **m,
                 "yes_ask": yes_ask,
                 "no_ask": no_ask,
@@ -213,10 +216,25 @@ class CompletenessArb:
                 "shares": shares,
                 "profit_per": profit,
                 "combined": yes_ask + no_ask,
-            })
+            }, "ok"
 
-            if (i + 1) % 40 == 0:
-                logger.info("Completeness book progress %d/%d", i + 1, len(candidates))
+        for start in range(0, len(candidates), BOOK_BATCH_SIZE):
+            batch = candidates[start:start + BOOK_BATCH_SIZE]
+            results = await asyncio.gather(*[_one(m) for m in batch], return_exceptions=True)
+            for i, result in enumerate(results):
+                done = start + i + 1
+                if isinstance(result, Exception):
+                    rejects["disconnect"] += 1
+                    continue
+                opp, reason = result
+                if reason != "disconnect":
+                    stats["checked_books"] += 1
+                if opp:
+                    opps.append(opp)
+                else:
+                    rejects[reason] += 1
+                if done % 40 == 0:
+                    logger.info("Completeness book progress %d/%d", done, len(candidates))
 
         stats["opportunities"] = len(opps)
         opps.sort(key=lambda x: -x["profit_per"])
@@ -257,12 +275,18 @@ class CompletenessArb:
                 pass
 
         elapsed = time.time() - start
+        if hasattr(self.client, "flush_token_cache"):
+            self.client.flush_token_cache()
+        reject_txt = " ".join(f"{k}={v}" for k, v in sorted(rejects.items()) if v)
         print(
             f"   Completeness done: opps={stats['opportunities']} "
             f"filled_pairs={stats['filled_pairs']} unwound={stats['unwound']} "
             f"errors={stats['errors']} ({elapsed:.0f}s)",
             flush=True,
         )
+        if reject_txt:
+            print(f"   Rejects: {reject_txt}", flush=True)
+            logger.info("Completeness rejects: %s", reject_txt)
         return stats
 
     async def _execute_pair(self, opp: Dict) -> str:

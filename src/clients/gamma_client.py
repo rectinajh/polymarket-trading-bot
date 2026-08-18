@@ -319,8 +319,10 @@ class GammaClient(TradingLoggerMixin):
                     if not m.get("enableOrderBook", True):
                         continue
 
-                    # Inject parent event so `_derive_market_fields` can pull tags
-                    m.setdefault("events", [event_with_tags])
+                    # Inject parent event so `_derive_market_fields` can pull tags.
+                    # Always overwrite: nested markets often already have an
+                    # `events` stub without tags, and setdefault would keep it.
+                    m["events"] = [event_with_tags]
 
                     derived = _derive_market_fields(m)
 
