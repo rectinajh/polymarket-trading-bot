@@ -14,9 +14,17 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+from src.strategies.capital_policy import (
+    DailyEntryLog,
+    correlation_key,
+    nav_max_position_pct,
+    size_shares,
+)
 from src.strategies.safe_compounder import (
     SafeCompounder,
     estimate_true_no_prob,
@@ -125,6 +133,7 @@ class TestSafeCompounderE2E(unittest.TestCase):
 
         compounder = SafeCompounder(
             client=client, gamma=gamma, dry_run=False,
+            entry_log=DailyEntryLog(path=Path(tempfile.mkdtemp()) / "entries.json"),
         )
         return compounder, client, registered, place_calls
 
@@ -239,6 +248,61 @@ class TestSafeCompounderE2E(unittest.TestCase):
         self.assertEqual(result.get("inventory_exited"), 1)
         self.assertEqual(len(place), 0)
 
+    def test_redeemable_position_dry_run(self):
+        markets = [_market(cond="0xf", yes_id="yf", no_id="nf", yes_last=0.40)]
+        books = {"yf": _book(yes_bid=0.50)}
+        c, client, registered, place = self._build_compounder(markets, books)
+        client.get_positions = AsyncMock(return_value={
+            "market_positions": [{
+                "ticker": "0xf",
+                "condition_id": "0xf",
+                "size": 5,
+                "side": "no",
+                "redeemable": True,
+                "endDate": "2020-01-01T00:00:00Z",
+            }],
+        })
+        c.dry_run = True
+        result = _run(c.run())
+        self.assertEqual(result.get("redeemed"), 1)
+        self.assertEqual(len(place), 0)
+
+    def test_daily_cap_six_uncorrelated(self):
+        names = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf"]
+        markets = []
+        books = {}
+        for i, name in enumerate(names):
+            yes_id = f"y{i}"
+            markets.append(_market(
+                cond=f"0x{i:02x}", yes_id=yes_id, no_id=f"n{i}",
+                yes_last=0.03, days_to_expiry=5.0,
+                title=f"Will {name} proposal pass the council vote?",
+            ))
+            books[yes_id] = _book(yes_bid=0.07)
+        c, client, registered, place = self._build_compounder(markets, books)
+        c.dry_run = True
+        result = _run(c.run())
+        self.assertEqual(result.get("placed"), 6)
+        self.assertGreaterEqual(result.get("skipped_daily_cap", 0), 1)
+
+    def test_weather_cluster_allows_only_one(self):
+        markets = [
+            _market(
+                cond="0xb1", yes_id="y1", no_id="n1", yes_last=0.03,
+                title="Will the highest temperature in Shanghai be 32°C on August 18?",
+            ),
+            _market(
+                cond="0xb2", yes_id="y2", no_id="n2", yes_last=0.03,
+                title="Will the highest temperature in Shanghai be 33°C on August 18?",
+            ),
+        ]
+        books = {"y1": _book(yes_bid=0.07), "y2": _book(yes_bid=0.07)}
+        c, client, registered, place = self._build_compounder(markets, books)
+        c.dry_run = True
+        result = _run(c.run())
+        self.assertEqual(result.get("placed"), 1)
+        self.assertGreaterEqual(result.get("skipped_cluster", 0), 1)
+
     def test_excluded_tag_market_dropped(self):
         """A market whose parent event has a sports tag should be filtered
         out by the SKIP_TAG_SLUGS pipeline before reaching candidate eval."""
@@ -284,6 +348,30 @@ class TestSafeCompounderMath(unittest.TestCase):
     def test_true_no_prob_has_no_time_boost(self):
         self.assertAlmostEqual(estimate_true_no_prob(0.03, hours_to_expiry=1), 0.97)
         self.assertAlmostEqual(estimate_true_no_prob(0.03, hours_to_expiry=720), 0.97)
+
+    def test_nav_tier_tightens_with_capital(self):
+        self.assertAlmostEqual(nav_max_position_pct(40_000), 0.05)    # $400
+        self.assertAlmostEqual(nav_max_position_pct(200_000), 0.02)   # $2k
+        self.assertAlmostEqual(nav_max_position_pct(1_000_000), 0.01)  # $10k
+        self.assertAlmostEqual(nav_max_position_pct(5_000_000), 0.005)  # $50k
+
+    def test_depth_caps_shares_before_nav(self):
+        # $10k NAV would allow many shares at 1%; 10-share book * 25% → 2.
+        shares = size_shares(
+            price=0.90,
+            nav_cents=1_000_000,
+            cash_cents=1_000_000,
+            ask_depth=10,
+        )
+        self.assertEqual(shares, 2)
+
+    def test_correlation_key_groups_weather_city(self):
+        a = correlation_key("Will the highest temperature in Shanghai be 32°C on August 18?")
+        b = correlation_key("Will the highest temperature in Shanghai be 33°C on August 17?")
+        c = correlation_key("Ethereum Up or Down - August 17, 12:00PM-4:00PM ET")
+        self.assertEqual(a, b)
+        self.assertEqual(a, "weather:shanghai")
+        self.assertEqual(c, "updown:ethereum")
 
 
 if __name__ == "__main__":

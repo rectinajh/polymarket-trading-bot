@@ -20,6 +20,14 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.clients.gamma_client import GammaClient
+from src.strategies.capital_policy import (
+    DEPTH_TAKE_PCT,
+    MAX_ENTRIES_PER_DAY,
+    DailyEntryLog,
+    correlation_key,
+    nav_max_position_pct,
+    size_shares,
+)
 from src.strategies.safe_compounder import nav_cents
 from src.utils.market_quality import should_skip_market_title
 
@@ -29,8 +37,7 @@ logger = logging.getLogger(__name__)
 MAX_COMBINED_ASK = 0.98
 MIN_PROFIT_PER_SHARE = 0.02  # 1 - combined >= this
 MIN_VOLUME = 5000.0
-MAX_SHARES_PER_TRADE = 20
-MAX_NOTIONAL_PCT = 0.02  # 2% of NAV
+MAX_NOTIONAL_PCT = 0.02  # extra ceiling vs NAV-tier cap
 MAX_MARKETS_TO_CHECK = 150
 MIN_ASK_SIZE = 5.0
 BOOK_BATCH_SIZE = 8
@@ -91,6 +98,7 @@ class CompletenessArb:
         max_combined: float = MAX_COMBINED_ASK,
         min_profit: float = MIN_PROFIT_PER_SHARE,
         min_volume: float = MIN_VOLUME,
+        entry_log: Optional[DailyEntryLog] = None,
     ):
         self.client = client
         self.gamma = gamma or GammaClient()
@@ -99,6 +107,7 @@ class CompletenessArb:
         self.max_combined = max_combined
         self.min_profit = min_profit
         self.min_volume = min_volume
+        self._entries = entry_log or DailyEntryLog()
 
     async def run(self, dry_run: Optional[bool] = None) -> Dict[str, Any]:
         if dry_run is not None:
@@ -120,13 +129,14 @@ class CompletenessArb:
         print("\n📐 COMPLETENESS ARB — YES+NO asks < $1", flush=True)
         print(
             f"   Rules: combined < ${self.max_combined:.2f} | "
-            f"min profit ${self.min_profit:.2f}/share | vol ≥ {self.min_volume:.0f}",
+            f"min profit ${self.min_profit:.2f}/share | vol ≥ {self.min_volume:.0f} | "
+            f"depth {DEPTH_TAKE_PCT*100:.0f}% of both asks | "
+            f"≤{MAX_ENTRIES_PER_DAY} entries/day",
             flush=True,
         )
 
         bal = await self.client.get_balance()
         cash, mtm, nav = nav_cents(bal)
-        max_notional_cents = max(100, int(nav * MAX_NOTIONAL_PCT))
 
         markets = await self.gamma.get_markets(
             active=True,
@@ -193,17 +203,13 @@ class CompletenessArb:
             if not ok or yes_ask is None or no_ask is None:
                 return None, reason.split("=")[0] if reason else "fail"
 
-            shares = int(min(yes_sz, no_sz, MAX_SHARES_PER_TRADE))
-            cost_cents = int(round((yes_ask + no_ask) * shares * 100))
-            if cost_cents > max_notional_cents or cost_cents > cash:
-                shares = max(
-                    0,
-                    min(
-                        shares,
-                        int(max_notional_cents / max(1, int(round((yes_ask + no_ask) * 100)))),
-                        int(cash / max(1, int(round((yes_ask + no_ask) * 100)))),
-                    ),
-                )
+            shares = size_shares(
+                price=yes_ask + no_ask,
+                nav_cents=nav,
+                cash_cents=cash,
+                ask_depth=min(yes_sz, no_sz),
+                extra_cap_pct=min(MAX_NOTIONAL_PCT, nav_max_position_pct(nav)),
+            )
             if shares < 1:
                 return None, "size"
 
@@ -247,10 +253,23 @@ class CompletenessArb:
                 flush=True,
             )
 
+        remaining_today = self._entries.remaining()
+        used_clusters = self._entries.clusters()
         for opp in opps:
+            if remaining_today <= 0:
+                break
+            cluster = correlation_key(opp.get("title") or "")
+            if cluster in used_clusters:
+                continue
             try:
                 result = await self._execute_pair(opp)
                 stats["attempted"] += 1
+                if result in ("filled", "dry"):
+                    self._entries.record(
+                        opp["ticker"], opp.get("title") or "", kind="completeness",
+                    )
+                    used_clusters.add(cluster)
+                    remaining_today -= 1
                 if result == "filled":
                     stats["filled_pairs"] += 1
                     cost = int(round(opp["combined"] * opp["shares"] * 100))
@@ -261,7 +280,7 @@ class CompletenessArb:
                     cash -= cost
                 elif result == "unwound":
                     stats["unwound"] += 1
-                # Only one live attempt per cycle to limit leg risk
+                # Only one live two-leg attempt per cycle to limit unmatched-leg risk
                 if not self.dry_run and result in ("filled", "unwound", "partial_fail"):
                     break
             except Exception as exc:
@@ -323,7 +342,7 @@ class CompletenessArb:
 
         yes_cents = int(round(yes_ask * 100))
         no_cents = int(round(no_ask * 100))
-        shares = int(min(shares, yes_sz, no_sz, MAX_SHARES_PER_TRADE))
+        shares = int(min(shares, yes_sz, no_sz))
         if shares < 1:
             return "stale"
 

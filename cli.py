@@ -179,6 +179,7 @@ def _run_conservative(
 ) -> None:
     """Phase A–C runner: Safe Compounder + Completeness Arb, no AI directional."""
     from src.clients import build_polymarket_clients
+    from src.strategies.capital_policy import DailyEntryLog
     from src.strategies.completeness_arb import CompletenessArb
     from src.strategies.safe_compounder import SafeCompounder
 
@@ -193,17 +194,27 @@ def _run_conservative(
 
     async def _run_once():
         async with build_polymarket_clients() as (client, gamma):
-            sc = SafeCompounder(client=client, gamma=gamma, dry_run=not live_mode)
+            entries = DailyEntryLog()
+            sc = SafeCompounder(
+                client=client, gamma=gamma, dry_run=not live_mode, entry_log=entries,
+            )
             sc_stats = await sc.run()
-            arb = CompletenessArb(client=client, gamma=gamma, dry_run=not live_mode)
+            arb = CompletenessArb(
+                client=client, gamma=gamma, dry_run=not live_mode, entry_log=entries,
+            )
             arb_stats = await arb.run()
             return {"safe_compounder": sc_stats, "completeness_arb": arb_stats}
 
     async def _run_forever():
         cycle = 0
         async with build_polymarket_clients() as (client, gamma):
-            sc = SafeCompounder(client=client, gamma=gamma, dry_run=not live_mode)
-            arb = CompletenessArb(client=client, gamma=gamma, dry_run=not live_mode)
+            entries = DailyEntryLog()
+            sc = SafeCompounder(
+                client=client, gamma=gamma, dry_run=not live_mode, entry_log=entries,
+            )
+            arb = CompletenessArb(
+                client=client, gamma=gamma, dry_run=not live_mode, entry_log=entries,
+            )
             while True:
                 cycle += 1
                 print(

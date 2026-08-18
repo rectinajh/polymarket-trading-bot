@@ -68,6 +68,25 @@ POLYMARKET_SPENDERS = {
     "neg_risk_adapter":     "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296",
 }
 
+# Conditional Tokens Framework (ERC1155) on Polygon.
+CTF_ERC1155_POLYGON = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+_ZERO_BYTES32 = b"\x00" * 32
+_REDEEM_ABI = [
+    {
+        "constant": False,
+        "inputs": [
+            {"name": "collateralToken", "type": "address"},
+            {"name": "parentCollectionId", "type": "bytes32"},
+            {"name": "conditionId", "type": "bytes32"},
+            {"name": "indexSets", "type": "uint256[]"},
+        ],
+        "name": "redeemPositions",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    }
+]
+
 # Treat anything ≥ this allowance as "set" for routine bot operation.
 # 10k USDC covers any realistic single-bot deployment; users running
 # enterprise-scale capital can bump it. Set very low (or to 0) and you'll
@@ -767,6 +786,11 @@ class PolymarketClient(TradingLoggerMixin):
                 "avg_price":             avg,
                 "current_price":         cur,
                 "realized_pnl_dollars":  pnl,
+                "title":                 p.get("title") or "",
+                "endDate":               p.get("endDate") or p.get("end_date") or "",
+                "redeemable":            bool(p.get("redeemable", False)),
+                "negative_risk":         bool(p.get("negativeRisk", p.get("negRisk", False))),
+                "event_slug":            p.get("eventSlug") or "",
                 # legacy legacy-shape aliases for the dashboard / cli
                 "ticker":                cond,
                 "event_ticker":          cond,
@@ -777,6 +801,64 @@ class PolymarketClient(TradingLoggerMixin):
             })
 
         return {"market_positions": positions, "event_positions": positions}
+
+    async def redeem_condition(
+        self, condition_id: str, neg_risk: bool = False
+    ) -> Dict[str, Any]:
+        """Redeem a resolved CTF condition back to collateral.
+
+        EOA wallets (signature_type=0) send `redeemPositions` on-chain.
+        Proxy / deposit wallets hold tokens on the funder, so the EOA cannot
+        redeem directly — callers should treat that as `redeem_needed`.
+        """
+        if int(self.signature_type or 0) != 0:
+            raise PolymarketAPIError(
+                "Proxy/deposit wallet: redeem in the Polymarket UI or Relayer "
+                f"(condition={condition_id[:18]})"
+            )
+        if not condition_id:
+            raise PolymarketAPIError("redeem_condition requires condition_id")
+
+        def _send():
+            from eth_account import Account
+            from web3 import Web3
+
+            w3 = self._ensure_w3()
+            acct = Account.from_key(self.private_key)
+            target = (
+                POLYMARKET_SPENDERS["neg_risk_adapter"] if neg_risk
+                else CTF_ERC1155_POLYGON
+            )
+            ctf = w3.eth.contract(
+                address=Web3.to_checksum_address(target),
+                abi=_REDEEM_ABI,
+            )
+            cond = bytes.fromhex(condition_id[2:] if condition_id.startswith("0x") else condition_id)
+            if len(cond) != 32:
+                raise PolymarketAPIError(f"condition_id must be 32 bytes, got {len(cond)}")
+            tx = ctf.functions.redeemPositions(
+                Web3.to_checksum_address(COLLATERAL_TOKEN_POLYGON),
+                _ZERO_BYTES32,
+                cond,
+                [1, 2],
+            ).build_transaction({
+                "from": acct.address,
+                "nonce": w3.eth.get_transaction_count(acct.address),
+                "chainId": self.chain_id,
+            })
+            signed = acct.sign_transaction(tx)
+            raw = getattr(signed, "rawTransaction", None) or signed.raw_transaction
+            tx_hash = w3.eth.send_raw_transaction(raw)
+            return tx_hash.hex()
+
+        try:
+            tx_hash = await asyncio.to_thread(_send)
+        except PolymarketAPIError:
+            raise
+        except Exception as exc:
+            raise PolymarketAPIError(f"redeemPositions failed: {exc}") from exc
+        self.logger.info("Redeem submitted", condition_id=condition_id[:18], tx=tx_hash)
+        return {"tx_hash": tx_hash, "condition_id": condition_id}
 
     # ------------------------------------------------------------------
     # Markets / orderbook

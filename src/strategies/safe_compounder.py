@@ -8,7 +8,9 @@ STRATEGY:
 - Real NO ask must be ≥ MIN_NO_ASK ($0.80)
 - Trade only when edge ≥ MIN_EDGE — FOK take the cheap ask (capture the
   mispricing we measured). Do not rest 1¢ below the ask.
-- Position size: max 5% of NAV (cash + mark-to-market) per position
+- Position size: min(25% of top-2 NO asks, NAV-tier cap, half-Kelly)
+- At most 6 new entries per calendar day (Asia/Shanghai); correlated titles share one slot
+- No daily PnL target — empty scans are expected
 
 Available via: python cli.py run --safe-compounder
 """
@@ -22,6 +24,16 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 from src.clients.gamma_client import GammaClient
+from src.strategies.capital_policy import (
+    DEPTH_TAKE_PCT,
+    MAX_ENTRIES_PER_DAY,
+    DailyEntryLog,
+    clusters_from_positions,
+    correlation_key,
+    nav_max_position_pct,
+    size_shares,
+    top_ask_depth,
+)
 from src.utils.market_quality import (
     FORCE_EXIT_HOURS_BEFORE_EXPIRY,
     should_skip_market_title,
@@ -55,6 +67,7 @@ SKIP_TITLE_PHRASES = [
 MIN_VOLUME = 5000
 MIN_NO_ASK = 0.80
 MIN_EDGE = 0.02
+# Hard ceiling; live cap is min(this, nav_max_position_pct(NAV)).
 MAX_POSITION_PCT = 0.05
 USE_KELLY = True
 MIN_CONFIDENCE = 0.5
@@ -260,6 +273,7 @@ class SafeCompounder:
         max_position_pct: float = MAX_POSITION_PCT,
         use_kelly: bool = USE_KELLY,
         min_confidence: float = MIN_CONFIDENCE,
+        entry_log: Optional[DailyEntryLog] = None,
     ):
         self.client = client
         self.gamma = gamma or GammaClient()
@@ -273,6 +287,7 @@ class SafeCompounder:
         self.min_confidence = min_confidence
         # Resolved at run-time on first use; depends on Gamma being reachable.
         self._skip_tag_ids: Optional[set] = None
+        self._entries = entry_log or DailyEntryLog()
 
     async def run(self, dry_run: Optional[bool] = None) -> Dict:
         """
@@ -285,21 +300,23 @@ class SafeCompounder:
         start = time.time()
 
         logger.info("=" * 70)
-        logger.info("SAFE COMPOUNDER v6 — LAST-VS-ASK NO-SIDE (FOK)")
+        logger.info("SAFE COMPOUNDER v7 — DEPTH-CAPPED NO-SIDE (FOK)")
         logger.info(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         logger.info(
             "Rules: NO only | real ask ≥ $%.2f | last-vs-ask edge ≥ $%.2f | "
-            "max %.0f%% NAV/position | FOK take ask",
-            self.min_no_ask, self.min_edge, self.max_position_pct * 100,
+            "depth %.0f%% of top-2 asks | ≤%d entries/day | no daily PnL target | FOK take ask",
+            self.min_no_ask, self.min_edge, DEPTH_TAKE_PCT * 100, MAX_ENTRIES_PER_DAY,
         )
         logger.info("=" * 70)
 
         bal = await self.client.get_balance()
         cash, mtm, nav = nav_cents(bal)
 
+        cap_pct = min(self.max_position_pct, nav_max_position_pct(nav))
         print(
             f"\n💰 Cash: ${cash/100:.2f} | MTM: ${mtm/100:.2f} | "
-            f"NAV (sizing): ${nav/100:.2f}\n",
+            f"NAV (sizing): ${nav/100:.2f} | "
+            f"cap {cap_pct*100:.1f}%/pos | remaining today {self._entries.remaining()}/{MAX_ENTRIES_PER_DAY}\n",
             flush=True,
         )
 
@@ -366,10 +383,14 @@ class SafeCompounder:
         print(f"  Orders placed:        {stats['placed']}", flush=True)
         print(f"  Instantly filled:     {stats['filled']}", flush=True)
         print(f"  Skipped (existing):   {stats['skipped_existing']}", flush=True)
+        print(f"  Skipped (cluster):    {stats.get('skipped_cluster', 0)}", flush=True)
+        print(f"  Skipped (daily cap):  {stats.get('skipped_daily_cap', 0)}", flush=True)
         print(f"  Errors:               {stats['errors']}", flush=True)
         print(f"  Capital deployed:     ${stats['total_deployed']/100:.2f}", flush=True)
         print(f"  Potential profit:     ${stats['total_potential_profit']/100:.2f}", flush=True)
         print(f"  Inventory exits:      {inv_stats.get('exited', 0)}", flush=True)
+        print(f"  Redeemed:             {inv_stats.get('redeemed', 0)}", flush=True)
+        print(f"  Redeem needed:        {inv_stats.get('redeem_needed', 0)}", flush=True)
         print(f"  YES orders cancelled: {cancelled}", flush=True)
         print(f"  Cash:                 ${cash_end/100:.2f}", flush=True)
         print(f"  MTM:                  ${mtm_end/100:.2f}", flush=True)
@@ -380,6 +401,8 @@ class SafeCompounder:
         stats["rejects"] = dict(rejects)
         stats["nav_cents"] = nav_end
         stats["inventory_exited"] = inv_stats.get("exited", 0)
+        stats["redeemed"] = inv_stats.get("redeemed", 0)
+        stats["redeem_needed"] = inv_stats.get("redeem_needed", 0)
         return stats
 
     async def _fetch_all_markets(self) -> List[Dict]:
@@ -548,9 +571,9 @@ class SafeCompounder:
                 return None, "low_conf"
 
             no_asks = ob.get("no_asks", []) or []
-            lowest_no_ask = None
+            lowest_no_ask, ask_depth = top_ask_depth(no_asks)
             no_ask_size = 0.0
-            if no_asks:
+            if lowest_no_ask is not None:
                 try:
                     priced = []
                     for row in no_asks:
@@ -561,9 +584,9 @@ class SafeCompounder:
                         if p > 0 and sz > 0:
                             priced.append((p, sz))
                     if priced:
-                        lowest_no_ask, no_ask_size = min(priced, key=lambda x: x[0])
+                        no_ask_size = min(priced, key=lambda x: x[0])[1]
                 except (ValueError, TypeError, IndexError):
-                    lowest_no_ask = None
+                    no_ask_size = ask_depth
 
             # Only real NO asks count. Derived (1 - YES bid) is not a takeable price.
             if lowest_no_ask is None:
@@ -613,6 +636,8 @@ class SafeCompounder:
                 "close_time": (m.get("close_time") or "")[:10],
                 "best_no_bid": best_no_bid,
                 "capture": "taker",
+                "ask_depth": ask_depth,
+                "ask_size": no_ask_size,
             }
             return opp, "ok"
 
@@ -648,13 +673,14 @@ class SafeCompounder:
         """FOK-take cheap NO asks. `portfolio` is NAV in cents."""
         try:
             positions_resp = await self.client.get_positions()
-            positions = positions_resp.get("market_positions", [])
+            positions = positions_resp.get("market_positions", []) or []
             pos_tickers = {
                 (p.get("ticker") or p.get("condition_id"))
                 for p in positions
                 if abs(float(p.get("size", 0) or 0)) > 0
             }
         except Exception:
+            positions = []
             pos_tickers = set()
 
         try:
@@ -668,26 +694,43 @@ class SafeCompounder:
             "placed": 0,
             "skipped_existing": 0,
             "skipped_size": 0,
+            "skipped_cluster": 0,
+            "skipped_daily_cap": 0,
             "filled": 0,
             "errors": 0,
             "total_potential_profit": 0,
             "total_deployed": 0,
         }
 
+        cap_pct = min(self.max_position_pct, nav_max_position_pct(portfolio))
+        remaining_today = self._entries.remaining()
         print(
             f"\n{'='*70}\nFOK TAKE NO ASKS — NAV: ${portfolio/100:.2f} | "
             f"Cash: ${cash/100:.2f} | {'DRY RUN' if self.dry_run else 'LIVE'}\n"
-            f"Max per position: ${portfolio * self.max_position_pct / 100:.2f} ({self.max_position_pct*100:.0f}% of NAV)\n"
+            f"Max per position: ${portfolio * cap_pct / 100:.2f} "
+            f"({cap_pct*100:.1f}% NAV, {DEPTH_TAKE_PCT*100:.0f}% book depth) | "
+            f"today {remaining_today}/{MAX_ENTRIES_PER_DAY}\n"
             f"{'='*70}\n",
             flush=True,
         )
 
+        pos_clusters = clusters_from_positions(positions) | self._entries.clusters()
+
         remaining_cash = cash
         for opp in opportunities:
+            if stats["placed"] >= remaining_today:
+                stats["skipped_daily_cap"] += 1
+                continue
+
             ticker = opp["ticker"]
+            title = opp.get("title") or ""
+            cluster = correlation_key(title)
 
             if ticker in pos_tickers or ticker in ord_tickers:
                 stats["skipped_existing"] += 1
+                continue
+            if cluster and cluster in pos_clusters:
+                stats["skipped_cluster"] += 1
                 continue
 
             contracts = self._calculate_position_size(opp, portfolio, remaining_cash)
@@ -713,7 +756,7 @@ class SafeCompounder:
                     f"  [DRY] FOK NO x{contracts} @ ${price:.2f} | "
                     f"EV:${opp['true_no_prob']:.2f} edge:${opp['edge']:.2f} | "
                     f"+${profit/100:.2f} ({opp['roi_pct']:.1f}% / {opp['annualized_roi']:.0f}%ann) | "
-                    f"{opp['days_to_expiry']}d{kelly_info}",
+                    f"{opp['days_to_expiry']}d{kelly_info} | depth:{opp.get('ask_depth', 0):.0f}",
                     flush=True,
                 )
                 print(f"    {opp['ticker']} — {opp['title']}", flush=True)
@@ -722,6 +765,8 @@ class SafeCompounder:
                 stats["total_deployed"] += cost
                 remaining_cash -= int(cost)
                 pos_tickers.add(ticker)
+                pos_clusters.add(cluster)
+                self._entries.record(ticker, title, kind="compounder")
                 continue
 
             try:
@@ -759,6 +804,8 @@ class SafeCompounder:
                 stats["total_deployed"] += cost
                 remaining_cash -= int(cost)
                 pos_tickers.add(ticker)
+                pos_clusters.add(cluster)
+                self._entries.record(ticker, title, kind="compounder")
                 await asyncio.sleep(0.2)
 
             except Exception as e:
@@ -769,31 +816,21 @@ class SafeCompounder:
         return stats
 
     def _calculate_position_size(self, opp: Dict, portfolio: int, cash: int) -> int:
-        """Size each position using Kelly or fixed fraction."""
-        max_position_value = int(portfolio * self.max_position_pct)
-        price = opp["our_price"]  # Already in dollar format
-
+        """Depth-first size, then NAV-tier / half-Kelly / cash caps."""
+        price = opp["our_price"]
+        kf = 0.0
         if self.use_kelly:
-            true_prob = opp["true_no_prob"]  # Already in 0-1 format
-            odds = (1.0 - price) / price  # Dollar format
-            kf = kelly_fraction(true_prob, odds)
-            half_kelly_f = kf * 0.5
-            kelly_position = int(portfolio * half_kelly_f)
-            position_value = min(kelly_position, max_position_value)
-        else:
-            position_value = max_position_value
-
-        # Convert price to cents for position calculation
-        price_cents = int(round(price * 100))
-        if price_cents <= 0:
-            return 0
-        contracts = position_value // price_cents
-        contracts = min(contracts, 200)
-        if contracts < 1:
-            return 0
-        if contracts * price_cents > cash:
-            contracts = cash // price_cents
-        return max(0, contracts)
+            true_prob = opp["true_no_prob"]
+            odds = (1.0 - price) / price if price else 0.0
+            kf = kelly_fraction(true_prob, odds) * 0.5
+        return size_shares(
+            price=price,
+            nav_cents=portfolio,
+            cash_cents=cash,
+            ask_depth=float(opp.get("ask_depth") or 0),
+            kelly_fraction_value=kf,
+            extra_cap_pct=self.max_position_pct,
+        )
 
     async def _cancel_yes_orders(self) -> int:
         """Cancel any resting YES-side orders (legacy)."""
@@ -830,10 +867,11 @@ class SafeCompounder:
             return 0
 
     async def manage_inventory(self) -> Dict:
-        """Exit positions inside the force-exit window. Conservative has no
-        other stop/profit path, so near-expiry inventory must not sit unattended.
-        """
-        stats = {"checked": 0, "exited": 0, "errors": 0, "no_book": 0}
+        """Exit near-expiry inventory; redeem resolved tokens instead of selling a dead book."""
+        stats = {
+            "checked": 0, "exited": 0, "errors": 0, "no_book": 0,
+            "redeemed": 0, "redeem_needed": 0,
+        }
         try:
             positions_resp = await self.client.get_positions()
             positions = positions_resp.get("market_positions", []) or []
@@ -854,7 +892,33 @@ class SafeCompounder:
             side = (pos.get("side") or "").lower()
             size = float(pos.get("size", 0) or 0)
             qty = int(round(size))
-            if not cond or qty < 1 or side not in ("yes", "no"):
+            if not cond or qty < 1:
+                continue
+
+            if pos.get("redeemable"):
+                print(
+                    f"  Redeemable {qty} {side.upper() or '?'} {cond[:18]}…",
+                    flush=True,
+                )
+                if self.dry_run:
+                    stats["redeemed"] += 1
+                    continue
+                if hasattr(self.client, "redeem_condition"):
+                    try:
+                        await self.client.redeem_condition(
+                            cond, neg_risk=bool(pos.get("negative_risk", False)),
+                        )
+                        stats["redeemed"] += 1
+                        continue
+                    except Exception as exc:
+                        logger.warning("Redeem failed %s: %s", cond[:18], exc)
+                        stats["redeem_needed"] += 1
+                        stats["errors"] += 1
+                        continue
+                stats["redeem_needed"] += 1
+                continue
+
+            if side not in ("yes", "no"):
                 continue
 
             hours_left = await self._hours_to_expiry(pos, cond, now_ts)
@@ -877,7 +941,10 @@ class SafeCompounder:
                 bids = book.get(side, []) or []
                 if not bids:
                     stats["no_book"] += 1
-                    logger.warning("Inventory: no %s bid for %s", side, cond[:18])
+                    logger.warning(
+                        "Inventory: no %s bid for %s — not selling a dead book",
+                        side, cond[:18],
+                    )
                     continue
                 best_bid = max(float(level[0]) for level in bids)
                 if best_bid > 1.0:
