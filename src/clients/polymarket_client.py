@@ -1270,17 +1270,62 @@ class PolymarketClient(TradingLoggerMixin):
             orders.append(normalized)
         return {"orders": orders}
 
+    async def _fetch_trades_data_api(
+        self,
+        limit: int = 100,
+        ticker: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Fetch recent trades from Polymarket data-api (no CLOB auth, faster)."""
+        addr = self._get_funding_address()
+        params: Dict[str, Any] = {"user": addr, "limit": max(1, min(limit, 500))}
+        if ticker:
+            params["market"] = ticker
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=12.0) as http:
+                resp = await http.get(f"{DEFAULT_DATA_HOST}/trades", params=params)
+                resp.raise_for_status()
+                raw = resp.json() or []
+        except Exception as exc:
+            raise PolymarketAPIError(
+                f"data-api trades fetch failed: {exc}"
+            ) from exc
+
+        if not isinstance(raw, list):
+            raw = raw.get("data", []) if isinstance(raw, dict) else []
+
+        trades: List[Dict[str, Any]] = []
+        for t in raw[:limit]:
+            cond = t.get("conditionId") or t.get("condition_id") or ""
+            if ticker and cond and cond != ticker:
+                continue
+            ts = t.get("timestamp") or t.get("match_time") or ""
+            trades.append({
+                "market": cond,
+                "conditionId": cond,
+                "side": t.get("side") or "",
+                "outcome": t.get("outcome") or "",
+                "size": float(t.get("size", 0) or 0),
+                "price": float(t.get("price", 0) or 0),
+                "status": t.get("status") or "CONFIRMED",
+                "match_time": str(ts),
+                "last_update": str(ts),
+                "transaction_hash": t.get("transactionHash") or t.get("transaction_hash") or "",
+                "title": t.get("title") or "",
+                "slug": t.get("slug") or "",
+            })
+        return trades
+
     async def get_trades(
         self,
         ticker: Optional[str] = None,
         limit: int = 100,
         cursor: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Return executed trades for the funder. Wraps the SDK's
-        `get_trades(TradeParams)` with legacy-shape filtering.
+        """Return executed trades for the funder.
 
-        Pagination beyond `limit` is left as TODO until a strategy needs it —
-        the SDK's `next_cursor` argument is supported but untested at scale.
+        Tries the CLOB SDK first (with a short timeout), then falls back to the
+        Polymarket data-api which is faster and more reliable for dashboard reads.
         """
         try:
             from py_clob_client_v2.clob_types import TradeParams
@@ -1299,17 +1344,21 @@ class PolymarketClient(TradingLoggerMixin):
             return client.get_trades(params, cursor) if cursor else client.get_trades(params)
 
         try:
-            raw = await asyncio.to_thread(_call) or []
+            raw = await asyncio.wait_for(asyncio.to_thread(_call), timeout=8.0) or []
+            trades = []
+            for t in raw[:limit]:
+                cond = t.get("market") or t.get("conditionId") or t.get("condition_id")
+                if ticker and cond != ticker:
+                    continue
+                trades.append(t)
+            return {"trades": trades, "cursor": None, "source": "clob"}
         except Exception as exc:
-            raise PolymarketAPIError(f"get_trades failed: {exc}") from exc
+            self.logger.warning(
+                "CLOB get_trades failed (%s); falling back to data-api", exc,
+            )
 
-        trades = []
-        for t in raw[:limit]:
-            cond = t.get("market") or t.get("conditionId") or t.get("condition_id")
-            if ticker and cond != ticker:
-                continue
-            trades.append(t)
-        return {"trades": trades, "cursor": None}
+        trades = await self._fetch_trades_data_api(limit=limit, ticker=ticker)
+        return {"trades": trades, "cursor": None, "source": "data-api"}
 
     # `get_fills` is the legacy-named alias for executed trades.
     async def get_fills(

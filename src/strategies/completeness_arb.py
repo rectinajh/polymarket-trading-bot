@@ -113,7 +113,7 @@ class CompletenessArb:
         if dry_run is not None:
             self.dry_run = dry_run
 
-        start = time.time()
+        t0 = time.time()
         stats = {
             "scanned": 0,
             "checked_books": 0,
@@ -224,11 +224,11 @@ class CompletenessArb:
                 "combined": yes_ask + no_ask,
             }, "ok"
 
-        for start in range(0, len(candidates), BOOK_BATCH_SIZE):
-            batch = candidates[start:start + BOOK_BATCH_SIZE]
+        for batch_start in range(0, len(candidates), BOOK_BATCH_SIZE):
+            batch = candidates[batch_start:batch_start + BOOK_BATCH_SIZE]
             results = await asyncio.gather(*[_one(m) for m in batch], return_exceptions=True)
             for i, result in enumerate(results):
-                done = start + i + 1
+                done = batch_start + i + 1
                 if isinstance(result, Exception):
                     rejects["disconnect"] += 1
                     continue
@@ -293,7 +293,7 @@ class CompletenessArb:
             except Exception:
                 pass
 
-        elapsed = time.time() - start
+        elapsed = time.time() - t0
         if hasattr(self.client, "flush_token_cache"):
             self.client.flush_token_cache()
         reject_txt = " ".join(f"{k}={v}" for k, v in sorted(rejects.items()) if v)

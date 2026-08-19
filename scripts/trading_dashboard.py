@@ -22,7 +22,7 @@ import sys
 import os
 import re
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 from typing import Optional
 
@@ -741,15 +741,17 @@ def load_system_health():
                     trades_resp = await client.get_trades(limit=25)
                     for t in trades_resp.get("trades", [])[:25]:
                         txh = t.get("transaction_hash") or t.get("transactionHash") or ""
-                        match_ts = t.get("match_time") or t.get("last_update") or ""
+                        match_ts = t.get("match_time") or t.get("last_update") or t.get("timestamp") or ""
                         try:
-                            ts_int = int(match_ts)
-                            # Polymarket sometimes returns ms-scale timestamps
+                            ts_int = int(float(match_ts))
                             if ts_int > 10_000_000_000:
                                 ts_int //= 1000
-                            when = datetime.utcfromtimestamp(ts_int).strftime("%Y-%m-%d %H:%M:%S UTC")
+                            when = datetime.fromtimestamp(ts_int, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
                         except Exception:
                             when = str(match_ts)
+                        title = (t.get("title") or "").strip()
+                        cond = t.get("market") or t.get("conditionId") or ""
+                        market_label = title[:60] if title else ((cond[:18] + "…") if cond else "")
                         recent_trades.append(
                             {
                                 "when": when,
@@ -758,12 +760,12 @@ def load_system_health():
                                 "size": float(t.get("size", 0) or 0),
                                 "price": float(t.get("price", 0) or 0),
                                 "status": t.get("status") or "",
-                                "market": (t.get("market") or "")[:18] + "…",
+                                "market": market_label,
                                 "tx_hash": txh,
                             }
                         )
                 except Exception as exc:
-                    st.warning(f"Could not fetch recent trades: {exc}")
+                    st.caption(f"最近成交暂不可用（CLOB/data-api）：{exc}")
 
                 recent_deposits: list = []
                 try:
