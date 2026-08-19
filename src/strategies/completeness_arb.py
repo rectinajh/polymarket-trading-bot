@@ -306,6 +306,8 @@ class CompletenessArb:
         if reject_txt:
             print(f"   Rejects: {reject_txt}", flush=True)
             logger.info("Completeness rejects: %s", reject_txt)
+        stats["rejects"] = dict(rejects)
+        stats["elapsed_s"] = round(elapsed, 1)
         return stats
 
     async def _execute_pair(self, opp: Dict) -> str:

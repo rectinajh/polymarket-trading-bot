@@ -31,7 +31,7 @@ Completeness（YES+NO ask &lt; $0.98）：期间 **0 笔**。
 
 ## 公式（用来核对「是不是套利」）
 
-口径以 `2e16627` / `2ddaede` 为准。代码改动见 [CHANGELOG.md](CHANGELOG.md)。
+口径以 `2e16627` / `2ddaede` 为准。代码改动见 [CHANGELOG.md](CHANGELOG.md)。策略模式对比见 [STRATEGY_MODES_AND_LEARNING.md](STRATEGY_MODES_AND_LEARNING.md)。
 
 - **Completeness（套利）**：`1 - (YES_ask + NO_ask) ≥ 0.02` 且两腿都能 FOK。锁结算 $1。
 - **Safe Compounder（方向性 NO）**：`edge = (1 - YES_last) - NO_ask`，要求 `edge ≥ 0.02`、`NO_ask ≥ 0.80`、剩余时间 &gt; 3h。不是锁定价差。

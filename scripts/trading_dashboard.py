@@ -35,6 +35,8 @@ load_dotenv(PROJECT_ROOT / ".env", override=True)
 
 from src.utils.database import DatabaseManager
 from src.clients import build_polymarket_clients
+from src.strategies.capital_policy import DailyEntryLog, MAX_ENTRIES_PER_DAY, trading_day
+from src.strategies.scan_stats import ScanStatsLog, DEFAULT_STATS_PATH
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _DEFAULT_LOG_PATH = PROJECT_ROOT / "logs" / "latest.log"
@@ -1143,11 +1145,251 @@ def render_equity_profit_chart(system_health_data: dict) -> None:
         st.rerun()
 
 
+def _format_scan_ts(ts: Optional[str]) -> str:
+    if not ts:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(str(ts))
+        return dt.strftime("%m-%d %H:%M")
+    except (TypeError, ValueError):
+        return str(ts)[:16]
+
+
+def _reject_rows(rejects: dict, limit: int = 8) -> pd.DataFrame:
+    if not rejects:
+        return pd.DataFrame(columns=["原因", "次数"])
+    items = sorted(rejects.items(), key=lambda x: -int(x[1]))[:limit]
+    labels = {
+        "edge_lt_min": "edge 不足（0<edge<2¢）",
+        "edge_negative": "edge 为负（ask>公允价）",
+        "no_ask_lt_min": "NO ask 过低",
+        "yes_last_gt_max": "YES last 过高",
+        "low_confidence": "置信度不足",
+        "book_empty": "盘口为空",
+        "disconnect": "盘口请求失败",
+        "book_disconnect": "盘口异常",
+        "no_real_ask": "无真实 NO ask",
+        "thin_ask": "ask 量过小",
+        "ask_below_min": "NO ask 低于阈值",
+        "combined_ge_max": "YES+NO ≥ $1",
+        "combined": "YES+NO ≥ $1",
+        "profit_lt_min": "利润不足",
+        "depth_lt_min": "深度不足",
+        "thin_size": "深度不足",
+        "vol_lt_min": "成交量不足",
+    }
+    return pd.DataFrame(
+        [{"原因": labels.get(k, k), "次数": int(v)} for k, v in items if int(v) > 0]
+    )
+
+
+@st.cache_data(ttl=30)
+def _load_scan_dashboard_data(stats_path: str) -> dict:
+    log = ScanStatsLog(Path(stats_path))
+    today = trading_day()
+    summary = log.daily_summary(today)
+    latest = log.latest_cycle() or {}
+    series = log.daily_filled_series(days=7)
+    entries = DailyEntryLog()
+    return {
+        "summary": summary,
+        "latest": latest,
+        "series": series,
+        "entries_used": MAX_ENTRIES_PER_DAY - entries.remaining(),
+        "entries_remaining": entries.remaining(),
+        "stats_path": stats_path,
+    }
+
+
+def render_conservative_scan_panel(project_root: Path) -> None:
+    """Conservative strategy scan metrics for the 7-day observation window."""
+    stats_path = project_root / DEFAULT_STATS_PATH
+    data = _load_scan_dashboard_data(str(stats_path))
+    summary = data["summary"]
+    latest = data["latest"]
+    sc = summary["safe_compounder"]
+    arb = summary["completeness_arb"]
+    sc_latest = latest.get("safe_compounder") or {}
+    arb_latest = latest.get("completeness_arb") or {}
+
+    st.subheader("🔍 Conservative 扫描观察")
+    st.caption(
+        f"交易日 {summary['day']}（Asia/Shanghai）· "
+        f"最近扫描 {_format_scan_ts(summary.get('last_scan_ts'))} · "
+        f"今日轮次 {summary['cycles']} · "
+        f"今日新开仓 {data['entries_used']}/{MAX_ENTRIES_PER_DAY}（两策略共用）"
+    )
+
+    if summary["cycles"] == 0:
+        st.info(
+            "尚无扫描记录。Bot 每轮 Conservative 循环结束后会写入 "
+            f"`{DEFAULT_STATS_PATH}`。部署本功能后需等 1～2 个扫描周期。"
+        )
+        return
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        st.metric(
+            "最近一轮 · 扫描市场",
+            f"{sc_latest.get('markets_scanned', sc['latest_markets_scanned'])}",
+            help="Safe Compounder 最近一轮从 Gamma 拉取的市场数",
+        )
+    with c2:
+        st.metric(
+            "最近一轮 · 过 edge",
+            f"{sc_latest.get('opportunities', sc['latest_opportunities'])}",
+            help="满足 NO ask、edge ≥ 2¢ 等条件的候选数",
+        )
+    with c3:
+        st.metric(
+            "今日 SC 成交",
+            sc["total_filled"],
+            delta=f"下单 {sc['total_placed']}",
+            help="Safe Compounder 今日 FOK 即时成交笔数",
+        )
+    with c4:
+        st.metric(
+            "今日 Arb 成交",
+            arb["total_filled_pairs"],
+            delta=f"尝试 {arb['total_attempted']}",
+            help="Completeness 今日成功 YES+NO 套利对数",
+        )
+    with c5:
+        st.metric(
+            "今日合计成交",
+            summary["total_filled"],
+            help="两策略今日成交总和",
+        )
+
+    with st.expander("最近一轮明细", expanded=False):
+        l1, l2 = st.columns(2)
+        with l1:
+            st.markdown("**Safe Compounder**")
+            st.markdown(
+                f"- 扫描 **{sc_latest.get('markets_scanned', '—')}** · "
+                f"NO 候选 **{sc_latest.get('candidates', '—')}** · "
+                f"过 edge **{sc_latest.get('opportunities', '—')}**\n"
+                f"- 下单 **{sc_latest.get('placed', 0)}** · "
+                f"成交 **{sc_latest.get('filled', 0)}** · "
+                f"赎回 **{sc_latest.get('redeemed', 0)}**\n"
+                f"- 跳过：已有仓 {sc_latest.get('skipped_existing', 0)} · "
+                f"聚类 {sc_latest.get('skipped_cluster', 0)} · "
+                f"日限 {sc_latest.get('skipped_daily_cap', 0)}\n"
+                f"- 耗时 {sc_latest.get('elapsed_s', '—')}s · "
+                f"NAV ${float(sc_latest.get('nav_cents', 0) or 0) / 100:.2f}"
+            )
+            rej_sc = _reject_rows(sc_latest.get("rejects") or {})
+            if not rej_sc.empty:
+                st.markdown("**拒绝原因（本轮）**")
+                st.dataframe(rej_sc, hide_index=True, width="stretch")
+        with l2:
+            st.markdown("**Completeness Arb**")
+            st.markdown(
+                f"- 扫描 **{arb_latest.get('scanned', '—')}** · "
+                f"查盘口 **{arb_latest.get('checked_books', '—')}** · "
+                f"有机会 **{arb_latest.get('opportunities', '—')}**\n"
+                f"- 尝试 **{arb_latest.get('attempted', 0)}** · "
+                f"成交 **{arb_latest.get('filled_pairs', 0)}** · "
+                f"回滚 {arb_latest.get('unwound', 0)}\n"
+                f"- 耗时 {arb_latest.get('elapsed_s', '—')}s"
+            )
+            rej_arb = _reject_rows(arb_latest.get("rejects") or {})
+            if not rej_arb.empty:
+                st.markdown("**拒绝原因（本轮）**")
+                st.dataframe(rej_arb, hide_index=True, width="stretch")
+
+    series = data["series"]
+    if series and any(r["cycles"] > 0 for r in series):
+        df = pd.DataFrame(series)
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        fig.add_trace(
+            go.Bar(x=df["day"], y=df["total_filled"], name="成交笔数", marker_color="#22c55e"),
+            secondary_y=False,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=df["day"],
+                y=df["sc_opportunities"] + df["arb_opportunities"],
+                name="过 edge / 有机会（轮次累计）",
+                mode="lines+markers",
+                line=dict(color="#3b82f6"),
+            ),
+            secondary_y=True,
+        )
+        fig.update_layout(
+            height=280,
+            margin=dict(l=10, r=10, t=30, b=10),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            title="近 7 日：成交 vs 有机会次数",
+        )
+        fig.update_yaxes(title_text="成交", secondary_y=False)
+        fig.update_yaxes(title_text="有机会（累计）", secondary_y=True)
+        st.plotly_chart(fig, use_container_width=True)
+
+    # Top edge opportunities (latest cycle)
+    top_edge = sc.get("top_edge") or []
+    if top_edge:
+        with st.expander(f"🏆 最佳 edge 候选 Top {len(top_edge)}（最近一轮）", expanded=False):
+            te_df = pd.DataFrame(top_edge)
+            te_df.columns = ["标题", "edge ($)", "NO ask ($)", "分类"]
+            st.dataframe(te_df, hide_index=True, width="stretch")
+
+    # Near-misses (latest cycle)
+    near_misses = sc.get("near_misses") or []
+    near_miss_count = sc.get("near_miss_count", 0)
+    if near_misses:
+        with st.expander(
+            f"🎯 Near-miss（edge 1~2¢ 差一点就能交易）共 {near_miss_count} 个，展示 Top {len(near_misses)}",
+            expanded=False,
+        ):
+            nm_df = pd.DataFrame(near_misses)
+            nm_df.columns = ["标题", "edge ($)", "NO ask ($)", "分类"]
+            st.dataframe(nm_df, hide_index=True, width="stretch")
+
+    # Category breakdown + reject breakdown side by side
+    cat_breakdown = sc.get("category_breakdown") or {}
+    has_rejects = bool(sc["rejects"] or arb["rejects"])
+    if cat_breakdown or has_rejects:
+        cols = st.columns(3 if cat_breakdown and has_rejects else (2 if has_rejects else 1))
+        col_idx = 0
+        if cat_breakdown:
+            with cols[col_idx]:
+                st.markdown("**今日有 edge 市场分类**")
+                cat_df = pd.DataFrame(
+                    [{"分类": k, "有 edge 次数": int(v)} for k, v in cat_breakdown.items()]
+                )
+                st.dataframe(cat_df, hide_index=True, width="stretch")
+                fig_cat = px.pie(
+                    cat_df, names="分类", values="有 edge 次数",
+                    height=250,
+                )
+                fig_cat.update_layout(margin=dict(l=0, r=0, t=25, b=0), showlegend=True)
+                st.plotly_chart(fig_cat, use_container_width=True)
+            col_idx += 1
+        if sc["rejects"]:
+            with cols[col_idx]:
+                rej = _reject_rows(sc["rejects"])
+                if not rej.empty:
+                    st.markdown("**今日 SC 拒绝 Top**")
+                    st.dataframe(rej, hide_index=True, width="stretch")
+            col_idx += 1
+        if arb["rejects"]:
+            with cols[min(col_idx, len(cols) - 1)]:
+                rej = _reject_rows(arb["rejects"])
+                if not rej.empty:
+                    st.markdown("**今日 Arb 拒绝 Top**")
+                    st.dataframe(rej, hide_index=True, width="stretch")
+
+    st.markdown("---")
+
+
 def show_overview(performance_data, positions, system_health_data, open_orders=None):
     """Show overview dashboard."""
     
     st.header("📈 System Overview")
     open_orders = open_orders or []
+
+    render_conservative_scan_panel(PROJECT_ROOT)
 
     token = system_health_data.get("collateral_token", "pUSD")
     deposit_addr = system_health_data.get("wallet_address", "?")

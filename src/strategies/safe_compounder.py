@@ -399,7 +399,27 @@ class SafeCompounder:
         print(f"{'='*70}\n", flush=True)
 
         stats["rejects"] = dict(rejects)
+        stats["markets_scanned"] = len(markets)
+        stats["candidates"] = len(candidates)
+        stats["opportunities"] = len(opportunities)
+        stats["elapsed_s"] = round(elapsed, 1)
         stats["nav_cents"] = nav_end
+
+        near = sorted(getattr(self, "_near_misses", []), key=lambda x: -x["edge"])
+        stats["near_misses"] = near[:15]
+        stats["near_miss_count"] = len(near)
+
+        top_edge = sorted_opps[:10]
+        stats["top_edge"] = [
+            {"title": o["title"], "edge": round(o["edge"], 4),
+             "no_ask": round(o["lowest_no_ask"], 3), "category": o.get("category", "unknown")}
+            for o in top_edge
+        ]
+
+        cat_counts: Counter = Counter()
+        for o in sorted_opps:
+            cat_counts[o.get("category", "unknown")] += 1
+        stats["category_breakdown"] = dict(cat_counts.most_common(15))
         stats["inventory_exited"] = inv_stats.get("exited", 0)
         stats["redeemed"] = inv_stats.get("redeemed", 0)
         stats["redeem_needed"] = inv_stats.get("redeem_needed", 0)
@@ -549,8 +569,12 @@ class SafeCompounder:
     async def _check_orderbook_and_price(
         self, candidates: List[Dict]
     ) -> Tuple[List[Dict], Counter]:
-        """Check real NO asks; only trade last-vs-ask edge on live liquidity."""
+        """Check real NO asks; only trade last-vs-ask edge on live liquidity.
+
+        Also populates ``self._near_misses`` — candidates with 0 < edge < min_edge.
+        """
         opportunities: List[Dict] = []
+        self._near_misses: List[Dict] = []
         rejects: Counter = Counter()
 
         async def _one(m: Dict) -> Tuple[Optional[Dict], str]:
@@ -598,7 +622,15 @@ class SafeCompounder:
 
             edge = true_no_prob - lowest_no_ask
             if edge < self.min_edge:
-                return None, "edge_lt_min"
+                if edge > 0:
+                    self._near_misses.append({
+                        "title": m.get("title", "")[:70],
+                        "edge": round(edge, 4),
+                        "no_ask": round(lowest_no_ask, 3),
+                        "category": m.get("_category", "unknown"),
+                    })
+                    return None, "edge_lt_min"
+                return None, "edge_negative"
 
             our_price = lowest_no_ask
             profit_per_contract = 1.0 - our_price
@@ -638,6 +670,7 @@ class SafeCompounder:
                 "capture": "taker",
                 "ask_depth": ask_depth,
                 "ask_size": no_ask_size,
+                "category": m.get("_category", "unknown"),
             }
             return opp, "ok"
 

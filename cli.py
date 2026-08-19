@@ -182,8 +182,10 @@ def _run_conservative(
     from src.strategies.capital_policy import DailyEntryLog
     from src.strategies.completeness_arb import CompletenessArb
     from src.strategies.safe_compounder import SafeCompounder
+    from src.strategies.scan_stats import ScanStatsLog
 
     _apply_live_flags(live_mode)
+    scan_log = ScanStatsLog()
 
     print("🛡️  CONSERVATIVE MODE (Safe Compounder + Completeness Arb)")
     print("   No AI directional / IMMEDIATE trades.")
@@ -203,6 +205,7 @@ def _run_conservative(
                 client=client, gamma=gamma, dry_run=not live_mode, entry_log=entries,
             )
             arb_stats = await arb.run()
+            scan_log.record_conservative_cycle(sc_stats, arb_stats)
             return {"safe_compounder": sc_stats, "completeness_arb": arb_stats}
 
     async def _run_forever():
@@ -222,8 +225,9 @@ def _run_conservative(
                     f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ────"
                 )
                 try:
-                    await sc.run()
-                    await arb.run()
+                    sc_stats = await sc.run()
+                    arb_stats = await arb.run()
+                    scan_log.record_conservative_cycle(sc_stats, arb_stats)
                 except Exception as exc:
                     print(f"Cycle {cycle} failed: {exc}. Continuing after {interval}s.")
                 print(f"\n⏳ Sleeping {interval}s before next cycle...")
