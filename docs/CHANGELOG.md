@@ -1,7 +1,7 @@
 # 改动记录
 
 每次策略、风控、下单口径的代码改动记在这里，方便对照实盘。
-PnL 数字仍记在 [NET_PNL.md](NET_PNL.md)。
+PnL 数字仍记在 [NET_PNL.md](NET_PNL.md)。**阶段计划与决策门**见 [ROADMAP.md](ROADMAP.md)。
 
 日期为提交日（仓库时区）。括号内是 git commit。
 

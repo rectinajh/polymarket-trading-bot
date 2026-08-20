@@ -1,6 +1,7 @@
 # 体育实验：RN1 / 榜前三在赚什么？成本与是否值得做
 
 用大白话整理自 2026-08 实盘讨论。Conservative 改动见 [CHANGELOG.md](CHANGELOG.md)；PnL 见 [NET_PNL.md](NET_PNL.md)。  
+**整体开发顺序（P0–P4）** → [ROADMAP.md](ROADMAP.md)  
 **各模式风险/利润/数学对比与学习路线** → [STRATEGY_MODES_AND_LEARNING.md](STRATEGY_MODES_AND_LEARNING.md)
 
 ---

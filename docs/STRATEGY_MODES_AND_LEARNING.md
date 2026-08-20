@@ -1,7 +1,7 @@
 # 各模式对比：风险、利润、数学依据与学习路线
 
 用大白话整理 Polymarket 上常见几种赚钱方式，方便和当前 **Conservative**（~$119 NAV）对照选型。  
-体育实验成本见 [SPORTS_EXPERIMENT_COSTS.md](SPORTS_EXPERIMENT_COSTS.md)；PnL 见 [NET_PNL.md](NET_PNL.md)。
+**整体开发顺序（P0–P4）**见 [ROADMAP.md](ROADMAP.md)。体育实验成本见 [SPORTS_EXPERIMENT_COSTS.md](SPORTS_EXPERIMENT_COSTS.md)；PnL 见 [NET_PNL.md](NET_PNL.md)。
 
 ---
 

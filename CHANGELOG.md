@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Live Conservative 口径与逐条改动（中文）见 [`docs/CHANGELOG.md`](docs/CHANGELOG.md)。PnL 台账见 [`docs/NET_PNL.md`](docs/NET_PNL.md)。模式对比与学习路线见 [`docs/STRATEGY_MODES_AND_LEARNING.md`](docs/STRATEGY_MODES_AND_LEARNING.md)；体育实验成本见 [`docs/SPORTS_EXPERIMENT_COSTS.md`](docs/SPORTS_EXPERIMENT_COSTS.md)。
+Live Conservative 口径与逐条改动（中文）见 [`docs/CHANGELOG.md`](docs/CHANGELOG.md)。PnL 台账见 [`docs/NET_PNL.md`](docs/NET_PNL.md)。**开发路线图**见 [`docs/ROADMAP.md`](docs/ROADMAP.md)。模式对比与学习路线见 [`docs/STRATEGY_MODES_AND_LEARNING.md`](docs/STRATEGY_MODES_AND_LEARNING.md)；体育实验成本见 [`docs/SPORTS_EXPERIMENT_COSTS.md`](docs/SPORTS_EXPERIMENT_COSTS.md)。
 
 ### 2026-08-18 — Large-capital policy (`2e16627`)
 - Shared `capital_policy.py`: take 25% of top-2 asks, NAV-tier caps, max 6 entries/day, correlation clusters

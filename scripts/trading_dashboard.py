@@ -24,7 +24,7 @@ import re
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 import json
-from typing import Optional
+from typing import Any, Optional
 
 # Add parent directory to path for imports
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -1157,6 +1157,19 @@ def _format_scan_ts(ts: Optional[str]) -> str:
         return str(ts)[:16]
 
 
+def _format_elapsed_s(value: Any) -> str:
+    """Format scan elapsed; reject bogus values from pre-fix bug (Unix timestamp leak)."""
+    try:
+        sec = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    if sec < 0 or sec > 3600:
+        return "—"
+    if sec >= 100:
+        return f"{sec:.0f}"
+    return f"{sec:.1f}"
+
+
 def _reject_rows(rejects: dict, limit: int = 8) -> pd.DataFrame:
     if not rejects:
         return pd.DataFrame(columns=["原因", "次数"])
@@ -1277,7 +1290,7 @@ def render_conservative_scan_panel(project_root: Path) -> None:
                 f"- 跳过：已有仓 {sc_latest.get('skipped_existing', 0)} · "
                 f"聚类 {sc_latest.get('skipped_cluster', 0)} · "
                 f"日限 {sc_latest.get('skipped_daily_cap', 0)}\n"
-                f"- 耗时 {sc_latest.get('elapsed_s', '—')}s · "
+                f"- 耗时 {_format_elapsed_s(sc_latest.get('elapsed_s'))}s · "
                 f"NAV ${float(sc_latest.get('nav_cents', 0) or 0) / 100:.2f}"
             )
             rej_sc = _reject_rows(sc_latest.get("rejects") or {})
@@ -1293,7 +1306,7 @@ def render_conservative_scan_panel(project_root: Path) -> None:
                 f"- 尝试 **{arb_latest.get('attempted', 0)}** · "
                 f"成交 **{arb_latest.get('filled_pairs', 0)}** · "
                 f"回滚 {arb_latest.get('unwound', 0)}\n"
-                f"- 耗时 {arb_latest.get('elapsed_s', '—')}s"
+                f"- 耗时 {_format_elapsed_s(arb_latest.get('elapsed_s'))}s"
             )
             rej_arb = _reject_rows(arb_latest.get("rejects") or {})
             if not rej_arb.empty:
