@@ -9,6 +9,8 @@ secrets.json
 data/token_cache.json
 data/scan_stats.json
 data/daily_entries.json
+data/scan_stats_btc15m.json
+data/daily_entries_btc15m.json
 config.json
 
 # Database files
