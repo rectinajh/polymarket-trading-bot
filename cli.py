@@ -47,6 +47,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         print("   This will use real money and place actual trades.")
 
     conservative = getattr(args, "conservative", False)
+    btc_15m = getattr(args, "btc_15m_completeness", False)
 
     # --conservative: Safe Compounder + Completeness Arb (no AI directional)
     if conservative:
@@ -54,6 +55,15 @@ def cmd_run(args: argparse.Namespace) -> None:
             live_mode=live_mode,
             loop=getattr(args, "loop", False),
             interval=getattr(args, "interval", 300),
+        )
+        return
+
+    # --btc-15m-completeness: independent BTC 15m Up/Down sleeve
+    if btc_15m:
+        _run_btc_15m_completeness(
+            live_mode=live_mode,
+            loop=getattr(args, "loop", False),
+            interval=getattr(args, "interval", 15),
         )
         return
 
@@ -240,6 +250,61 @@ def _run_conservative(
             asyncio.run(_run_once())
     except KeyboardInterrupt:
         print("\nConservative mode stopped by user.")
+
+
+def _run_btc_15m_completeness(
+    live_mode: bool = False,
+    loop: bool = False,
+    interval: int = 15,
+) -> None:
+    """Independent BTC 15m Completeness sleeve (default dry-run)."""
+    from src.clients import build_polymarket_clients
+    from src.strategies.btc_15m_completeness import Btc15mCompleteness
+
+    _apply_live_flags(live_mode)
+
+    print("⏱️  BTC 15m COMPLETENESS SLEEVE")
+    print("   Independent from Conservative. Separate daily_entries_btc15m.json.")
+    if not live_mode:
+        print("   DRY RUN — no real orders (pass --live to trade)")
+    if loop:
+        print(f"   Continuous — every {interval}s. Ctrl-C to stop.")
+    if live_mode:
+        print("   ⚠️  LIVE: keep sleeve small; orphan risk on single-leg fills.")
+
+    async def _run_once():
+        async with build_polymarket_clients() as (client, gamma):
+            strat = Btc15mCompleteness(
+                client=client, gamma=gamma, dry_run=not live_mode,
+            )
+            return await strat.run()
+
+    async def _run_forever():
+        cycle = 0
+        async with build_polymarket_clients() as (client, gamma):
+            strat = Btc15mCompleteness(
+                client=client, gamma=gamma, dry_run=not live_mode,
+            )
+            while True:
+                cycle += 1
+                print(
+                    f"\n──── BTC15m Cycle {cycle} — "
+                    f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ────"
+                )
+                try:
+                    await strat.run()
+                except Exception as exc:
+                    print(f"Cycle {cycle} failed: {exc}. Continuing after {interval}s.")
+                print(f"\n⏳ Sleeping {interval}s...")
+                await asyncio.sleep(interval)
+
+    try:
+        if loop:
+            asyncio.run(_run_forever())
+        else:
+            asyncio.run(_run_once())
+    except KeyboardInterrupt:
+        print("\nBTC 15m sleeve stopped by user.")
 
 
 def cmd_dashboard(args: argparse.Namespace) -> None:
@@ -812,6 +877,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  python cli.py run                      Start AI Ensemble mode (default, paper)\n"
             "  python cli.py run --live               AI Ensemble with real capital\n"
             "  python cli.py run --conservative --live --loop   Recommended: SC + arb, no AI\n"
+            "  python cli.py run --btc-15m-completeness --loop --interval 15   BTC 15m dry-run\n"
             "  python cli.py run --safe-compounder    Safe Compounder: math-only NO-side\n"
             "  python cli.py run --safe-compounder --live  Safe Compounder live\n"
             "  python cli.py run --beast              Beast mode (aggressive, not recommended)\n"
@@ -868,10 +934,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Conservative: Safe Compounder + Completeness Arb (no AI directional)",
     )
+    strategy_group.add_argument(
+        "--btc-15m-completeness",
+        action="store_true",
+        dest="btc_15m_completeness",
+        help="BTC 15m Up/Down Completeness sleeve (independent; default dry-run)",
+    )
     p_run.add_argument(
         "--loop",
         action="store_true",
-        help="Re-run continuously (--conservative / --safe-compounder)",
+        help="Re-run continuously (--conservative / --safe-compounder / --btc-15m-completeness)",
     )
     p_run.add_argument(
         "--interval",

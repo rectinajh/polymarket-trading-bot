@@ -51,5 +51,26 @@ module.exports = {
       merge_logs: true,
       time: true,
     },
+    {
+      name: "polymarket-btc15m",
+      cwd: "/www/polymarket-trading-bot",
+      script: "/www/polymarket-trading-bot/.venv/bin/python",
+      // Dry-run first. Add --live only after opportunity density looks real.
+      args: "cli.py run --btc-15m-completeness --loop --interval 15 --log-level INFO",
+      interpreter: "none",
+      autorestart: true,
+      max_restarts: 20,
+      min_uptime: "10s",
+      restart_delay: 5000,
+      kill_timeout: 15000,
+      max_memory_restart: "500M",
+      env: {
+        PYTHONUNBUFFERED: "1",
+      },
+      out_file: "/www/polymarket-trading-bot/logs/pm2-btc15m-out.log",
+      error_file: "/www/polymarket-trading-bot/logs/pm2-btc15m-error.log",
+      merge_logs: true,
+      time: true,
+    },
   ],
 };

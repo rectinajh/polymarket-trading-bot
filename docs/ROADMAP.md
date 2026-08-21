@@ -18,11 +18,11 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；模式对比见 [STRATEGY_MODES_AND_LEARNING.
 
 | 阶段 | 时间（建议） | 主题 | 状态 |
 |---|---|---|---|
-| **P0** | 现在 → **2026-08-25** | 观察 + 基线 | **进行中**；策略阈值冻结 |
+| **P0** | 现在 → **2026-08-25** | 观察 + 基线 | **进行中**；Conservative 阈值冻结 |
 | **P1** | 8/25–8/28 | 复盘 + 定价/选池诊断 | 只读分析 → 决定小改或不改 |
 | **P2** | 8/28–9/10 | Conservative 增强（可选） | 选池 / 公允价 / 仪表盘 |
-| **P3** | 9 月中（可选） | BTC 15m Completeness 实验 | 独立进程 + 小仓 |
-| **P4** | 更晚（可选） | RN1 体育 Maker | 新模块；资金到位再开 |
+| **P3** | **2026-08-21 起**（提前） | BTC 15m Completeness 实验 | **干跑已开工**；独立进程 |
+| **P4** | P3 干跑有结论后 | RN1 体育 Maker | 排队；不与 P3 抢主线 |
 | **P5** | 贯穿 | 工程债 / 运维 | 赎回、告警、文档 |
 
 ---
@@ -87,33 +87,48 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；模式对比见 [STRATEGY_MODES_AND_LEARNING.
 
 ---
 
-## P3 — BTC 15m Completeness 实验（可选，2～4 周）
+## P3 — BTC 15m Completeness 实验（**已提前启动 2026-08-21**）
 
-对应「两边 &lt; $1 + orphan 管理」类需求（如 gabagool 风格），**独立于主 Conservative**。
+用户决定提前开 P3；**Conservative 主 bot 不停、不松阈值**。本 sleeve **独立进程 / 独立日限额 / 默认干跑**。
 
-| 里程碑 | 内容 | 约工期 |
+### 代码入口
+
+| 资源 | 路径 |
+|---|---|
+| 策略包 | `src/strategies/btc_15m_completeness/` |
+| 发现 | `discover.py` — slug `btc-updown-15m-{unix}` |
+| 执行 | `strategy.py` — Completeness + orphan unwind |
+| CLI | `python cli.py run --btc-15m-completeness --loop --interval 15` |
+| Live | 同上加 `--live`（仅在干跑证明有机会后） |
+| PM2 | `ecosystem.config.cjs` → `polymarket-btc15m`（干跑） |
+| 扫描日志 | `data/scan_stats_btc15m.json` |
+| 日限额 | `data/daily_entries_btc15m.json`（与主 bot 隔离） |
+
+### 里程碑
+
+| 里程碑 | 内容 | 状态 |
 |---|---|---|
-| M1 | 市场发现：下一场 BTC 15m condition、开收时间 | 2～3 天 |
-| M2 | 双边定价：ask 合计 &lt; 阈值才下；FOK/GTC 策略选定 | 2～4 天 |
-| M3 | **Orphan 管理**：单腿成交 → 立即对冲/市价平；超时强平 | 3～5 天 |
-| M4 | 结算前清仓 / 赎回；区间 PnL 台账（每 15m 一行） | 2～3 天 |
-| M5 | 独立 PM2 + 小仓（建议 ≤ 总资金 1/5）干跑 → 实盘 | 持续 |
+| M1 | 市场发现：slug 对齐 15m 窗 | **已做** |
+| M2 | 双边定价 + FOK 干跑统计 | **已做（干跑）** |
+| M3 | Orphan：第二腿失败 unwind Up | **基础已做**；超时强平待加强 |
+| M4 | 结算前清仓 / 区间 PnL 台账 | 待做 |
+| M5 | 干跑 ≥2 天 → 小仓 `--live` | 进行中 |
 
 ### 与外包帖子的关系
 
-- **策略类型可做**：与现有 `completeness_arb.py` 同族，需专用 15m 调度与腿风险引擎。
-- **验收标准不可承诺**：「每 15m 均赚 $10–250、连跑 3 天」在 ~$119 NAV 下不现实（288 区间 × $10 即 ~$2,880，需大量本金与机会密度）。
+- **策略类型可做**：与现有 `completeness_arb.py` 同族，专用 15m 调度。
+- **验收标准不可承诺**：「每 15m 均赚 $10–250」在 ~$119 NAV 下不现实。
 - **自有验收指标**：有机会次数、腿失败率、区间盈亏分布、orphan 处理成功率。
 
-**硬约束：** 主 bot Conservative **继续跑**；资金 / 进程隔离。
+**硬约束：** 主 bot Conservative **继续跑**；资金 / 进程隔离；**先干跑再 live**。
 
 **通过标准：** 干跑 ≥2 天无逻辑事故；小仓 ≥3 天腿失败率可控；再谈加仓。
 
 ---
 
-## P4 — RN1 体育 Maker（可选，更晚，3～6 周+）
+## P4 — RN1 体育 Maker（排队，P3 干跑有结论后再开）
 
-仅在 Conservative 观察结论清楚，且愿意**另开资金/账号**时启动。  
+**不与 P3 并行大开发。** P3 证明「短周期 Completeness 机会密度」后，再开 RN1。  
 成本与条件见 [SPORTS_EXPERIMENT_COSTS.md](SPORTS_EXPERIMENT_COSTS.md)。
 
 **开发顺序：**
@@ -124,7 +139,7 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；模式对比见 [STRATEGY_MODES_AND_LEARNING.
 4. WebSocket + adverse selection  
 5. 独立 PnL / PM2  
 
-**不做：** 用 $100 验证能否「复制榜一 RN1」。
+**不做：** 用 $100 验证能否「复制榜一 RN1」；P3 干跑未完成前不写 RN1 主代码。
 
 ---
 
@@ -151,9 +166,9 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；模式对比见 [STRATEGY_MODES_AND_LEARNING.
 同时最多 1 个「改策略」主题 + 1 个小修
 
 决策门：
-  2026-08-25  → 开不开 P2 / P3
-  P3 干跑过关 → 开不开小仓
-  资金到位    → 开不开 P4
+  2026-08-25  → Conservative 复盘（A/B）；P3 已提前干跑
+  P3 干跑过关 → 开不开小仓 `--live`
+  资金到位 + P3 有结论 → 开不开 P4 RN1
 ```
 
 ---
@@ -161,15 +176,11 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；模式对比见 [STRATEGY_MODES_AND_LEARNING.
 ## 默认路径（少纠结版）
 
 ```text
-现在 ──P0──► 8/25 复盘
-                │
-                ├─ near-miss≈0 且 edge 负占优 ──► 维持 Conservative，可选 P2.1 选池
-                │
-                ├─ 诊断出公允价问题 ──► P2.2
-                │
-                └─ 15m 机会密度够 且想做 ──► P3 干跑（独立 sleeve）
-                         │
-                         └─ 以后资金/兴趣 ──► P4 RN1
+现在 ──P0 Conservative 观察──► 8/25 复盘
+ │
+ └── P3 BTC 15m 干跑（已开，独立）──► 有机会密度？
+                                      ├─ 是 → 小仓 live → 再谈加仓
+                                      └─ 否 → 停 sleeve；再评估 P4 RN1 是否值得
 ```
 
 ---
@@ -178,10 +189,10 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；模式对比见 [STRATEGY_MODES_AND_LEARNING.
 
 | 日期 | 动作 |
 |---|---|
-| 今～8/24 | 只观察，记拒绝结构 |
-| **8/25（二）** | 复盘会：定 A/B/C |
-| 8/26–8/28 | P1 诊断（或开 P2.1）；仍不开 RN1 |
-| 8/28 后 | 按门控进 P2 / P3 |
+| **8/21 起** | P3 干跑：`pm2 start polymarket-btc15m` 或 CLI；主 bot 不动 |
+| 今～8/24 | Conservative 只观察 |
+| **8/25（二）** | Conservative 复盘；看 P3 干跑机会统计 |
+| 8/26 后 | 按数据决定 P3 live / 维持干跑 / 停；RN1 仍排队 |
 
 ---
 
@@ -190,12 +201,15 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；模式对比见 [STRATEGY_MODES_AND_LEARNING.
 | 资源 | 路径 |
 |---|---|
 | Conservative 入口 | `cli.py --conservative --loop` |
+| **BTC 15m sleeve** | `cli.py run --btc-15m-completeness --loop --interval 15` |
 | Safe Compounder | `src/strategies/safe_compounder.py` |
 | Completeness Arb | `src/strategies/completeness_arb.py` |
+| BTC 15m 包 | `src/strategies/btc_15m_completeness/` |
 | 扫描统计 | `src/strategies/scan_stats.py` → `data/scan_stats.json` |
+| 15m 扫描日志 | `data/scan_stats_btc15m.json` |
 | Dashboard | `scripts/trading_dashboard.py` |
 | Edge 诊断脚本 | `scripts/edge_diagnostic.py` |
 
 ---
 
-*最后更新：2026-08-20 — 观察窗至 2026-08-25。*
+*最后更新：2026-08-21 — P3 BTC 15m 干跑提前启动；Conservative 观察仍至 2026-08-25；RN1 排队。*

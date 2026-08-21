@@ -7,6 +7,18 @@ PnL 数字仍记在 [NET_PNL.md](NET_PNL.md)。**阶段计划与决策门**见 [
 
 ---
 
+## 2026-08-21 — BTC 15m Completeness sleeve 干跑（P3 提前）
+
+**目的：** 用户要求提前开 15m/RN1；先做 BTC 15m Completeness 独立 sleeve，RN1 排队。
+
+- 新增 `src/strategies/btc_15m_completeness/`：slug 发现 + Completeness 扫描 + orphan unwind
+- CLI：`python cli.py run --btc-15m-completeness [--loop] [--interval 15] [--live]`
+- 独立 `data/daily_entries_btc15m.json` / `data/scan_stats_btc15m.json`
+- PM2：`polymarket-btc15m`（默认干跑，无 `--live`）
+- Conservative 主 bot **不动**
+
+---
+
 ## 2026-08-18 — 大资金仓位政策与赎回 (`2e16627`)
 
 **目的**：资金变大后不再按「每天赚固定几美元」交易；空仓是合法结果。同时处理已结算仓位，避免对着死盘口硬卖。
