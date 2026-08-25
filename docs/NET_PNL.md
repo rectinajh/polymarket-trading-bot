@@ -20,7 +20,7 @@
 
 **当前 PM2（2026-08-26）：** `polymarket-bot` **live** 240s；`polymarket-btc15m` **live** 60s；`polymarket-ops-alerts` 120s + Discord；Dashboard :8501。
 
-**ROADMAP 未完成项（摘要）：** P4 RN1（$500+）；P2.3 **执行降门槛**（需 near-miss>0 + 人工）。详见 [ROADMAP.md](ROADMAP.md#未完成--待办)。
+**ROADMAP 未完成项（摘要）：** P4 RN1 **live**（MVP dry-run 已开）；P2.3 **执行降门槛**（需 near-miss>0 + 人工）。详见 [ROADMAP.md](ROADMAP.md#未完成--待办)。
 
 累计 Conservative **已实现（约计）：+$2.00**（上海 17 +$0.66，ETH +$0.78，上海 18 close-all +$0.56）。
 

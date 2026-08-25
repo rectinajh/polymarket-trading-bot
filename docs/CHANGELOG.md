@@ -9,6 +9,30 @@ PnL 数字仍记在 [NET_PNL.md](NET_PNL.md)。**阶段计划与决策门**见 [
 
 ---
 
+## 2026-08-26 — P4 RN1 聪明钱确认（Layer 2）
+
+**目的：** Pinnacle 信号通过后，再与 RN1 成交对齐才下单。
+
+- `src/strategies/sports/rn1_tracker.py`：轮询 data-api 缓存 RN1 24h 成交
+- `RN1_CONFIRM_MODE=strict`（默认）：同 condition、YES BUY、价格 ≤ limit+2tick
+- 可选 `event`（同场比赛有 RN1 活动） / `off`（关闭）
+- 环境变量：`RN1_PROXY_WALLET`、`RN1_LOOKBACK_HOURS`、`RN1_PRICE_TOLERANCE_TICKS`
+
+---
+
+## 2026-08-26 — P4 RN1 体育 Maker L1 MVP
+
+**目的：** 正式开发 RN1 袖套（Pinnacle 参考 + 热门 YES Maker），与 Conservative 资金隔离。
+
+- `THE_ODDS_API_KEY` → `src/clients/odds_api_client.py`（Pinnacle h2h，EU 联赛）
+- `src/strategies/sports/`：发现「Will X win on date?」、队名匹配、edge、GTC YES bid
+- CLI：`python cli.py run --sports-rn1 [--loop] [--live]`
+- PM2：`polymarket-sports-rn1`（300s，**默认 dry-run**）
+- 台账：`data/daily_entries_sports.json`；扫描：`data/scan_stats_sports.json`
+- 默认：`≤1% NAV/笔`，`≤2 笔/天`，edge ≥5pt，开球前 ≥2h
+
+---
+
 ## 2026-08-26 — Completeness orphan + Discord warning + P2.3 框架
 
 **目的：** 收尾 ROADMAP 待办（不改 live MIN_EDGE）。

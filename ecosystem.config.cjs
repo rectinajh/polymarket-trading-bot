@@ -90,5 +90,26 @@ module.exports = {
       merge_logs: true,
       time: true,
     },
+    {
+      name: "polymarket-sports-rn1",
+      cwd: "/www/polymarket-trading-bot",
+      script: "/www/polymarket-trading-bot/.venv/bin/python",
+      // P4 RN1: Pinnacle ref + favorite YES maker bids. Dry-run until NAV/caps reviewed.
+      args: "cli.py run --sports-rn1 --loop --interval 300 --log-level INFO",
+      interpreter: "none",
+      autorestart: true,
+      max_restarts: 20,
+      min_uptime: "10s",
+      restart_delay: 5000,
+      kill_timeout: 15000,
+      max_memory_restart: "500M",
+      env: {
+        PYTHONUNBUFFERED: "1",
+      },
+      out_file: "/www/polymarket-trading-bot/logs/pm2-sports-rn1-out.log",
+      error_file: "/www/polymarket-trading-bot/logs/pm2-sports-rn1-error.log",
+      merge_logs: true,
+      time: true,
+    },
   ],
 };

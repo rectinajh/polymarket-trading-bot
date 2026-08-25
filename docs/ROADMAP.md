@@ -7,7 +7,7 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；P1 书面结论见 [P1_REVIEW.md](P1_REVIEW.m
 
 ## 总原则
 
-1. **一条主线跑稳，再开支线** — Conservative 为主；15m 独立 live 袖套（小仓）；RN1 排队。
+1. **一条主线跑稳，再开支线** — Conservative 为主；15m / RN1 均为独立袖套（小仓）。
 2. **先有数据，再改代码** — P0 观察窗已关闭；后续改动需对照 `scan_stats` / Dashboard。
 3. **资金量决定策略上限** — ~$119 适合验证逻辑，不适合「每 15m $10–250」类 KPI。
 4. **质量门槛不动** — `MIN_EDGE=0.02`、`Completeness 0.98` 维持；优化选池与执行，不松风控换成交。
@@ -22,7 +22,7 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；P1 书面结论见 [P1_REVIEW.md](P1_REVIEW.m
 | **P1** | **8/25–8/26** | 复盘 + 定价/选池诊断 | **✅ 已完成** → [P1_REVIEW.md](P1_REVIEW.md) |
 | **P2** | **8/26 起** | Conservative 小改（选 B） | **✅ 核心项已完成**；2.2/2.3 按 P1 跳过 |
 | **P3** | 8/21 起 | BTC+ETH 15m Completeness | **✅ live 60s**（P1 曾建议 dry-run；**8/26 用户改回 live**） |
-| **P4** | P3 有结论后再议 | RN1 体育 Maker | **⏸ 未开始**（仍排队） |
+| **P4** | **8/26 起** | RN1 体育 Maker | **🟡 L1 MVP 已开发**（默认 dry-run；NAV ~$119 小仓） |
 | **P5** | 贯穿 | 工程债 / 运维 | **✅ 核心已完成**（告警/Discord/redeem/M3/M4）；见 [未完成清单](#未完成--待办) |
 
 ---
@@ -106,9 +106,22 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；P1 书面结论见 [P1_REVIEW.md](P1_REVIEW.m
 
 ---
 
-## P4 — RN1 体育 Maker ⏸ 未开始
+## P4 — RN1 体育 Maker 🟡 L1 MVP（dry-run）
 
-P3 结论为机会密度≈0；~$119 不适合开 P4。详见 [SPORTS_EXPERIMENT_COSTS.md](SPORTS_EXPERIMENT_COSTS.md)。
+独立 PM2：`polymarket-sports-rn1`（300s，**无 `--live`**）。  
+逻辑：Polymarket 足球「Will X win on date?」热门盘（0.50–0.85） vs **Pinnacle h2h**（The Odds API）→ GTC YES Maker  bid。  
+资金：`≤1% NAV/笔`，`≤2 笔/天`，独立台账 `daily_entries_sports.json`。  
+详见 [SPORTS_EXPERIMENT_COSTS.md](SPORTS_EXPERIMENT_COSTS.md)。
+
+| 项 | 状态 |
+|---|---|
+| Odds API + Pinnacle 参考线 | ✅ `odds_api_client.py` |
+| RN1 聪明钱确认（Layer 2） | ✅ `rn1_tracker.py`，默认 `strict` |
+| 市场发现 + 队名匹配 | ✅ `src/strategies/sports/` |
+| CLI `--sports-rn1` + PM2 | ✅ 默认 dry-run |
+| Live 实盘 | ⏸ 需人工 `--live` + NAV/样本评估 |
+
+**仍缺：** WebSocket Maker、双边库存、Dashboard 体育面板、60 天对照实验。
 
 ---
 
@@ -127,7 +140,7 @@ P3 结论为机会密度≈0；~$119 不适合开 P4。详见 [SPORTS_EXPERIMENT
 | P3 M3 orphan 超时强平 | ✅ `orphan_unwind.py` + **btc15m + completeness_arb** |
 | P3 M4 15m 区间 PnL | ✅ `btc15m_window_pnl.json` + Dashboard |
 
-**仍缺（见下节）：** 等数据/资金再开的策略项（P4 RN1）。
+**仍缺（见下节）：** P4 live 评估、P2.3 执行降门槛（near-miss>0）。
 
 ---
 
@@ -139,7 +152,7 @@ P3 结论为机会密度≈0；~$119 不适合开 P4。详见 [SPORTS_EXPERIMENT
 
 | 项 | 状态 |
 |---|---|
-| **Git 提交/推送** | 人工 |
+| **Git 提交/推送** | ✅ P4 体育 MVP |
 
 ### 等数据再考虑（P1 门槛）
 
@@ -153,7 +166,7 @@ P3 结论为机会密度≈0；~$119 不适合开 P4。详见 [SPORTS_EXPERIMENT
 
 | 项 | 建议门槛 | 现状 |
 |---|---|---|
-| **P4 RN1 体育 Maker** | NAV **≥ $500** 且独立运维带宽 | **⏸ 未开始**，见 [SPORTS_EXPERIMENT_COSTS.md](SPORTS_EXPERIMENT_COSTS.md) |
+| **P4 RN1 体育 Maker** | NAV **≥ $500** 建议 live；L1 MVP 已 dry-run | **🟡 MVP 已开发**，见 [SPORTS_EXPERIMENT_COSTS.md](SPORTS_EXPERIMENT_COSTS.md) |
 
 ### 运营观察（非开发）
 
@@ -173,6 +186,7 @@ P3 结论为机会密度≈0；~$119 不适合开 P4。详见 [SPORTS_EXPERIMENT
 | `polymarket-dashboard` | Streamlit :8501 | — |
 | `polymarket-btc15m` | **`--btc-15m-completeness --live`** | **60s** |
 | `polymarket-ops-alerts` | `ops_alerts.py --loop 120s` | **120s** |
+| `polymarket-sports-rn1` | **`--sports-rn1` dry-run** | **300s** |
 
 ---
 
@@ -187,7 +201,7 @@ P3 结论为机会密度≈0；~$119 不适合开 P4。详见 [SPORTS_EXPERIMENT
 2026-08-26  P2 + P5 核心完成（告警/Discord/redeem/M3/M4）
             15m + Conservative 均 live
             → 未完成见上文「未完成 / 待办」：
-               · P4 RN1（$500+ 再议）
+               · P4 RN1（L1 dry-run 已开；live 待 $500+）
                · P2.3 降门槛（仅 near-miss>0 + 人工）
                · Completeness orphan ✅ · Discord warning ✅ · P2.3 框架 ✅
 ```
@@ -204,7 +218,7 @@ Conservative live（focus 天气+48h，日限 2，门槛不变）
 
 15m live 60s（≤2% NAV/笔，≤12/天；P1 数据仍显示机会极稀）
 
-RN1：排队，不开
+RN1：L1 dry-run（PM2 sports-rn1）；live 待评估
 ```
 
 ---
