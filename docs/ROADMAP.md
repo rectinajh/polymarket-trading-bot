@@ -22,7 +22,7 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；P1 书面结论见 [P1_REVIEW.md](P1_REVIEW.m
 | **P1** | **8/25–8/26** | 复盘 + 定价/选池诊断 | **✅ 已完成** → [P1_REVIEW.md](P1_REVIEW.md) |
 | **P2** | **8/26 起** | Conservative 小改（选 B） | **✅ 核心项已完成**；2.2/2.3 按 P1 跳过 |
 | **P3** | 8/21 起 | BTC+ETH 15m Completeness | **✅ live 60s**（P1 曾建议 dry-run；**8/26 用户改回 live**） |
-| **P4** | **8/26 起** | RN1 体育 Maker | **🟡 L1 MVP 已开发**（默认 dry-run；NAV ~$119 小仓） |
+| **P4** | **8/26 起** | RN1 体育 Maker | **🟡 L1 live**；**L2 排队** → [P4_L2_NEXT.md](P4_L2_NEXT.md) |
 | **P5** | 贯穿 | 工程债 / 运维 | **✅ 核心已完成**（告警/Discord/redeem/M3/M4）；见 [未完成清单](#未完成--待办) |
 
 ---
@@ -106,25 +106,35 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；P1 书面结论见 [P1_REVIEW.md](P1_REVIEW.m
 
 ---
 
-## P4 — RN1 体育 Maker 🟡 L1 MVP（dry-run）
+## P4 — RN1 体育 Maker 🟡 L1 live（L2 排队）
 
-独立 PM2：`polymarket-sports-rn1`（300s，**无 `--live`**）。  
-逻辑：Polymarket 足球「Will X win on date?」热门盘（0.50–0.85） vs **Pinnacle h2h**（The Odds API）→ GTC YES Maker  bid。  
-资金：`≤1% NAV/笔`，`≤2 笔/天`，独立台账 `daily_entries_sports.json`。  
+独立 PM2：`polymarket-sports-rn1`（**`--live`**，300s）。  
+逻辑：Polymarket 足球「Will X win on date?」热门盘（0.50–0.85） vs **Pinnacle h2h**（The Odds API）→ GTC YES bid + **RN1 strict** 确认。  
+资金：`≤1% NAV/笔`，`≤2 笔/天`；台账 `daily_entries_sports.json` · `sports_pnl.json` · 90d 停损。  
 详见 [SPORTS_EXPERIMENT_COSTS.md](SPORTS_EXPERIMENT_COSTS.md)。
 
 | 项 | 状态 |
 |---|---|
 | Odds API + Pinnacle 参考线 | ✅ `odds_api_client.py` |
-| RN1 聪明钱确认（Layer 2） | ✅ `rn1_tracker.py`，默认 `strict` |
+| RN1 聪明钱确认 | ✅ `rn1_tracker.py`，默认 `strict` |
 | 体育 PnL + 90d 停损 | ✅ `sports_pnl.py` + `sports_guard.py` |
-| Discord 体育推送 | ✅ `sports_alerts.py`（挂单/结算/暂停） |
-| 防重复挂单 | ✅ 检测 open YES orders |
+| Discord 体育推送 | ✅ `sports_alerts.py` |
+| 防重复挂单 | ✅ open YES orders 检测 |
 | 市场发现 + 队名匹配 | ✅ `src/strategies/sports/` |
-| CLI `--sports-rn1` + PM2 | ✅ **live** 300s |
-| Live 实盘 | ✅ PM2 `--live`（≤1% NAV，RN1 strict） |
+| CLI `--sports-rn1` + PM2 live | ✅ 300s |
+| Dashboard 体育面板 | ✅ Overview `render_sports_rn1_panel` |
 
-**仍缺：** WebSocket Maker、双边库存（L2）；其余 L1 台账/告警/停损已上线。
+**L1 范围冻结。** 不在本阶段开发：**WebSocket 订单簿**、**双边 Maker 库存** → 见 **[P4 L2 下一阶段](P4_L2_NEXT.md)**。
+
+---
+
+## P4 L2 — 下一阶段 ⏸ 排队
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| **WebSocket 订单簿** | ⏸ 排队 | CLOB WS 替代 300s REST；欧足时段秒级 |
+| **双边 Maker 库存** | ⏸ 排队 | 同场 YES/NO 报价 + inventory 敞口管理 |
+| **启动建议** | — | NAV ≥ $500；L1 ≥ 30d 样本；见 [P4_L2_NEXT.md](P4_L2_NEXT.md) |
 
 ---
 
@@ -143,7 +153,7 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；P1 书面结论见 [P1_REVIEW.md](P1_REVIEW.m
 | P3 M3 orphan 超时强平 | ✅ `orphan_unwind.py` + **btc15m + completeness_arb** |
 | P3 M4 15m 区间 PnL | ✅ `btc15m_window_pnl.json` + Dashboard |
 
-**仍缺（见下节）：** P4 live 评估、P2.3 执行降门槛（near-miss>0）。
+**仍缺（见下节）：** P2.3 执行降门槛（near-miss>0）；P4 L2（WebSocket + 双边库存，见 [P4_L2_NEXT.md](P4_L2_NEXT.md)）。
 
 ---
 
@@ -165,11 +175,18 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；P1 书面结论见 [P1_REVIEW.md](P1_REVIEW.m
 | **P2.2 公允价调整** | P1 诊断发现系统偏差 | **跳过** |
 | **降 `MIN_EDGE` / 放宽 0.98** | 有 near-miss 或 P1 支持 | **明确不做**（自动） |
 
-### 等资金再开（~$119 不适合）
+### P4 L2 — 下一阶段（排队）
 
-| 项 | 建议门槛 | 现状 |
+| 项 | 启动门槛 | 现状 |
 |---|---|---|
-| **P4 RN1 体育 Maker** | NAV **≥ $500** 建议 live；L1 MVP 已 dry-run | **🟡 MVP 已开发**，见 [SPORTS_EXPERIMENT_COSTS.md](SPORTS_EXPERIMENT_COSTS.md) |
+| **WebSocket 订单簿** | NAV ≥ $500；L1 稳定 ≥ 30d | ⏸ [P4_L2_NEXT.md](P4_L2_NEXT.md) |
+| **双边 Maker 库存** | 同上 + 接受更高占用资金 | ⏸ 同上 |
+
+### 等资金再观察（L1 已 live）
+
+| 项 | 说明 |
+|---|---|
+| **P4 L1 样本** | strict 下可能长期 0 笔；看 `scan_stats_sports.json` / `sports_pnl.json` |
 
 ### 运营观察（非开发）
 
@@ -177,6 +194,7 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；P1 书面结论见 [P1_REVIEW.md](P1_REVIEW.m
 |---|---|
 | Conservative **0 成交** | 市况偏贵；focus 池 + 日限 2 已上线，等天气类窗口 |
 | 15m **0 成交** | P1：2000 轮；live 继续但机会极稀 |
+| 体育 **RN1 strict** | 可能长期 0 笔；L2 不提前开 |
 | PM2 **重启次数** | `ops_alerts` 会 warning；需时查 `pm2 logs` |
 
 ---
@@ -201,12 +219,9 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；P1 书面结论见 [P1_REVIEW.md](P1_REVIEW.m
             → B 小改选池（已完成）
             → C 15m 书面推荐 dry-run
 
-2026-08-26  P2 + P5 核心完成（告警/Discord/redeem/M3/M4）
-            15m + Conservative 均 live
-            → 未完成见上文「未完成 / 待办」：
-               · P4 RN1（L1 dry-run 已开；live 待 $500+）
-               · P2.3 降门槛（仅 near-miss>0 + 人工）
-               · Completeness orphan ✅ · Discord warning ✅ · P2.3 框架 ✅
+2026-08-26  P2 + P5 核心完成；P4 L1 live + PnL/停损/Discord
+            P4 L2（WebSocket + 双边库存）→ 排队，见 P4_L2_NEXT.md
+            → P2.3 降门槛（仅 near-miss>0 + 人工）
 ```
 
 ---
@@ -221,7 +236,9 @@ Conservative live（focus 天气+48h，日限 2，门槛不变）
 
 15m live 60s（≤2% NAV/笔，≤12/天；P1 数据仍显示机会极稀）
 
-RN1：L1 **live**（PM2 sports-rn1，RN1 strict + Dashboard 面板）
+RN1 L1 live（PM2 sports-rn1，strict，Dashboard）
+        │
+        └─ L2 排队：WebSocket 盘口 + 双边 Maker 库存（见 P4_L2_NEXT.md）
 ```
 
 ---
@@ -234,7 +251,8 @@ RN1：L1 **live**（PM2 sports-rn1，RN1 strict + Dashboard 面板）
 | 净利润台账 | [NET_PNL.md](NET_PNL.md) |
 | 改动记录 | [CHANGELOG.md](CHANGELOG.md) |
 | Edge 诊断 | `scripts/edge_diagnostic.py` · `scripts/p1_review.py` |
+| P4 L2 规划 | [P4_L2_NEXT.md](P4_L2_NEXT.md) |
 
 ---
 
-*最后更新：2026-08-26 — **Relayer 自动 redeem** 上线；P0～P5 核心完成。*
+*最后更新：2026-08-26 — P4 L1 live；**L2（WebSocket + 双边库存）排队** → [P4_L2_NEXT.md](P4_L2_NEXT.md)。*

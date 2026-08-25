@@ -2,6 +2,7 @@
 
 用大白话整理自 2026-08 实盘讨论。Conservative 改动见 [CHANGELOG.md](CHANGELOG.md)；PnL 见 [NET_PNL.md](NET_PNL.md)。  
 **整体开发顺序（P0–P4）** → [ROADMAP.md](ROADMAP.md)  
+**P4 L1 live；L2 排队** → [P4_L2_NEXT.md](P4_L2_NEXT.md)  
 **各模式风险/利润/数学对比与学习路线** → [STRATEGY_MODES_AND_LEARNING.md](STRATEGY_MODES_AND_LEARNING.md)
 
 ---
@@ -285,13 +286,25 @@ Polymarket 体育/event 赚钱者
 | 问题 | 建议 |
 |---|---|
 | RN1 / 榜前三说明什么？ | **真钱在体育/event 大池**；RN1 是 **Maker + 足球热门标价错误**，榜前三 **品类相近、打法不必相同** |
-| 要不要现在做体育实验？ | **不急于 $100 双代码库实盘**；可先 L0 研究 + L1 paper |
+| 要不要现在做体育实验？ | **L1 已 live 小仓验证**；L2（WS + 双边库存）**排队**，见 [P4_L2_NEXT.md](P4_L2_NEXT.md) |
 | Conservative 还要不要跑？ | **要**；0 单 ≠ 坏了，是 **今天池子里没有 ≥2¢ edge**（见 `scripts/edge_diagnostic.py`） |
 | 最先花的钱 worth it 排序 | ① 美东 VPS ② 可信 Odds API ③ Maker/库存代码 ④ 加大样本资金 ⑤ **最后**才考虑 Go/Rust |
 
 **一句话：** RN1 和榜前列 **在同一个「体育定价错误」游泳池里游泳**；你们 Conservative **在另一个小池塘等鱼**。要进游泳池，付的主要是 **资金、参考线、欧足时段运维、排队**——不是换编程语言。
 
 模式全表、学习优先级与个人路线见 **[STRATEGY_MODES_AND_LEARNING.md](STRATEGY_MODES_AND_LEARNING.md)**。
+
+---
+
+## 十一、当前状态（2026-08-26）
+
+| 档位 | 状态 | 说明 |
+|---|---|---|
+| **L0 研究** | ✅ 文档 + RN1 主页 | 概念已对齐 |
+| **L1 最小 bot** | ✅ **live** | PM2 `polymarket-sports-rn1`；Pinnacle + RN1 strict；≤1% NAV |
+| **L2 认真 Maker** | ⏸ **排队** | **WebSocket 订单簿** + **双边 Maker 库存**；见 [P4_L2_NEXT.md](P4_L2_NEXT.md) |
+
+**决策：** L1 功能范围 **冻结**；L2 待 NAV ≥ $500 且 L1 稳定 ≥ 30 天再开代码 sprint。
 
 ---
 

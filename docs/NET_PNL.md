@@ -18,9 +18,9 @@
 | 2026-08-25～26 | ~119.38 | 0.00 | **~119.38** | close-all 后全现金；P0 观察窗内 scan_stats `nav_cents=11938` |
 | 2026-08-26 | 119.38 | 0.00 | **119.38** | **已确认**：无持仓、无 redeemable；上海 8/18 经 close-all 平仓入账 |
 
-**当前 PM2（2026-08-26）：** `polymarket-bot` **live** 240s；`polymarket-btc15m` **live** 60s；`polymarket-ops-alerts` 120s + Discord；Dashboard :8501。
+**当前 PM2（2026-08-26）：** `polymarket-bot` **live** 240s；`polymarket-btc15m` **live** 60s；`polymarket-sports-rn1` **live** 300s（RN1 strict）；`polymarket-ops-alerts` 120s + Discord；Dashboard :8501。
 
-**ROADMAP 未完成项（摘要）：** P4 RN1 **live**（MVP dry-run 已开）；P2.3 **执行降门槛**（需 near-miss>0 + 人工）。详见 [ROADMAP.md](ROADMAP.md#未完成--待办)。
+**ROADMAP 未完成项（摘要）：** P2.3 **执行降门槛**（需 near-miss>0 + 人工）；P4 **L2 排队**（WebSocket + 双边 Maker 库存 → [P4_L2_NEXT.md](P4_L2_NEXT.md)）。详见 [ROADMAP.md](ROADMAP.md#未完成--待办)。
 
 累计 Conservative **已实现（约计）：+$2.00**（上海 17 +$0.66，ETH +$0.78，上海 18 close-all +$0.56）。
 
@@ -37,7 +37,8 @@
 | 2026-08-18 09:10 | 上海 8/18 最高温 32°C `0x34f4df9b…` | NO | 6 | 0.89 | 5.34 | **close-all 已平**（非 redeem） | **+0.56** |
 
 Completeness（YES+NO ask &lt; $0.98）：**0 笔**（含 P0 观察窗）。  
-BTC/ETH 15m sleeve：**0 笔**（8/21 起 live；8/26 曾短暂 dry-run 后恢复 live；累计仍 0 成交）。
+BTC/ETH 15m sleeve：**0 笔**（8/21 起 live；8/26 曾短暂 dry-run 后恢复 live；累计仍 0 成交）。  
+RN1 体育 L1 sleeve：**live**（8/26 起；strict 确认下成交样本待积累；台账 `data/sports_pnl.json`）。
 
 ## 公式（用来核对「是不是套利」）
 

@@ -1,7 +1,7 @@
 # 各模式对比：风险、利润、数学依据与学习路线
 
 用大白话整理 Polymarket 上常见几种赚钱方式，方便和当前 **Conservative**（~$119 NAV）对照选型。  
-**整体开发顺序（P0–P4）**见 [ROADMAP.md](ROADMAP.md)。体育实验成本见 [SPORTS_EXPERIMENT_COSTS.md](SPORTS_EXPERIMENT_COSTS.md)；PnL 见 [NET_PNL.md](NET_PNL.md)。
+**整体开发顺序（P0–P4）**见 [ROADMAP.md](ROADMAP.md)。体育实验成本见 [SPORTS_EXPERIMENT_COSTS.md](SPORTS_EXPERIMENT_COSTS.md)；**P4 L2 规划**见 [P4_L2_NEXT.md](P4_L2_NEXT.md)；PnL 见 [NET_PNL.md](NET_PNL.md)。
 
 ---
 
@@ -199,11 +199,11 @@
 | **外部参考线（Pinnacle）** | 无尺子则体育退化为赌博 |
 | **链上 trades vs Activity API** | 复盘别误判 maker/taker |
 
-### 第三优先级（NAV ≥ $2k 且愿做体育实验）
+### 第三优先级 — P4 L2（排队，非当前 sprint）
 
-- 赛程、WebSocket 盘口、Maker 库存、adverse selection  
-- 美东 VPS、Odds API  
-- 见 [SPORTS_EXPERIMENT_COSTS.md](SPORTS_EXPERIMENT_COSTS.md) L1～L2  
+- **WebSocket 订单簿**、**双边 Maker 库存**、adverse selection  
+- 美东 VPS、欧足时段运维  
+- 启动门槛：NAV ≥ $500、L1 ≥ 30d → [P4_L2_NEXT.md](P4_L2_NEXT.md) · [SPORTS_EXPERIMENT_COSTS.md](SPORTS_EXPERIMENT_COSTS.md) L2 表  
 
 ### 明确不要主修
 
@@ -219,17 +219,17 @@
 ## 五、个人路线建议（一张图）
 
 ```text
-现在（NAV ~$100–500）
+现在（NAV ~$119）
   ├─ 主修：① Conservative 数学 + ② Completeness + Kelly/风控 + 执行/样本
-  ├─ 辅修：RN1/FLB 概念（只读，不实盘）
-  └─ 动作：Conservative 继续跑；台账；空扫不焦虑
+  ├─ 袖套：P4 RN1 **L1 live**（小仓、strict；积累样本）
+  └─ 动作：Conservative 继续跑；体育 L2 **不开发**（见 P4_L2_NEXT.md）
 
-6～12 个月后（若 NAV ≥ $500～1000 且仍想对比）
-  ├─ 体育 L0 paper + Pinnacle 价差日志
-  └─ 仍不学 Go/Rust、Gurobi，除非 profiling 证明需要
+NAV ≥ $500 且 L1 ≥ 30d 样本
+  ├─ 评估开 P4 L2：WebSocket 盘口 + 双边 Maker 库存
+  └─ 仍不学 Go/Rust，除非 profiling 证明需要
 
 除非全职 + $10k+
-  └─ 再考虑 L2 Maker 或 ⑥ 跨市场（职业量化路径）
+  └─ 再考虑完整 L2 Maker 或 ⑥ 跨市场（职业量化路径）
 ```
 
 ---
@@ -242,7 +242,7 @@
 | **风险最低且已在验证** | ② 理论最低（常 0 笔）；① 单笔小但有 tail risk |
 | **最该学的** | 定价错误 + 无套利 + Kelly + 执行/样本 |
 | **储备阅读** | FLB / Maker / **Pinnacle 当尺子**（为将来决策，非现在实盘） |
-| **现在实盘** | **只跑 Conservative**；体育等 NAV 与样本量到位再议 |
+| **现在实盘** | **Conservative + 15m + P4 L1 体育**（小仓）；**L2 排队** |
 
 **易混概念速查：**
 

@@ -9,6 +9,15 @@ PnL 数字仍记在 [NET_PNL.md](NET_PNL.md)。**阶段计划与决策门**见 [
 
 ---
 
+## 2026-08-26 — P4 L2 排队（WebSocket + 双边 Maker 库存）
+
+**目的：** L1 范围冻结；WebSocket 订单簿与双边 Maker 库存明确为 **下一阶段**，不写代码直至门槛满足。
+
+- 新增 [P4_L2_NEXT.md](P4_L2_NEXT.md)：L2 规格、启动门槛（NAV ≥ $500、L1 ≥ 30d）、实现顺序
+- [ROADMAP.md](ROADMAP.md) / [NET_PNL.md](NET_PNL.md) / [SPORTS_EXPERIMENT_COSTS.md](SPORTS_EXPERIMENT_COSTS.md) / [STRATEGY_MODES_AND_LEARNING.md](STRATEGY_MODES_AND_LEARNING.md) 同步
+
+---
+
 ## 2026-08-26 — 体育 PnL / 停损 / Discord 完善
 
 **目的：** 补齐体育 L1 运维：结算台账、90 天实验停损、Discord、Dashboard PnL。
@@ -219,5 +228,5 @@ PnL 数字仍记在 [NET_PNL.md](NET_PNL.md)。**阶段计划与决策门**见 [
 - **已完成**：Proxy Relayer **自动** redeem（`relayer_redeem.py` + Relayer API key）。
 - **未完成**：Conservative `completeness_arb` orphan sweep（btc15m 已接 `orphan_unwind`）。
 - P2.2 公允价 / P2.3：**框架已接**（near-miss>0 才 active）；**未**自动降低 live `MIN_EDGE`。
-- P4 RN1 体育 Maker：**排队**（建议 NAV ≥ $500 再开）。
+- P4 RN1 体育 Maker：**L1 live**；**L2（WebSocket + 双边库存）排队** → [P4_L2_NEXT.md](P4_L2_NEXT.md)。
 - 完整待办列表见 [ROADMAP.md — 未完成 / 待办](ROADMAP.md#未完成--待办)。
