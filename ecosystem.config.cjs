@@ -94,8 +94,8 @@ module.exports = {
       name: "polymarket-sports-rn1",
       cwd: "/www/polymarket-trading-bot",
       script: "/www/polymarket-trading-bot/.venv/bin/python",
-      // P4 RN1: Pinnacle ref + favorite YES maker bids. Dry-run until NAV/caps reviewed.
-      args: "cli.py run --sports-rn1 --loop --interval 300 --log-level INFO",
+      // P4 RN1 live: ≤1% NAV/position, ≤2/day, Pinnacle + RN1 strict confirm.
+      args: "cli.py run --sports-rn1 --live --loop --interval 300 --log-level INFO",
       interpreter: "none",
       autorestart: true,
       max_restarts: 20,

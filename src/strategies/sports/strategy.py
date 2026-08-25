@@ -71,6 +71,8 @@ class Rn1SportsMaker:
         t0 = time.time()
         stats: Dict[str, Any] = {
             "mode": "sports_rn1_maker",
+            "live": not self.dry_run,
+            "rn1_confirm_mode": RN1_CONFIRM_MODE,
             "scanned": 0,
             "favorite_band": 0,
             "matched_reference": 0,

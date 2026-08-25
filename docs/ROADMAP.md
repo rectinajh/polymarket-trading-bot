@@ -118,10 +118,10 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；P1 书面结论见 [P1_REVIEW.md](P1_REVIEW.m
 | Odds API + Pinnacle 参考线 | ✅ `odds_api_client.py` |
 | RN1 聪明钱确认（Layer 2） | ✅ `rn1_tracker.py`，默认 `strict` |
 | 市场发现 + 队名匹配 | ✅ `src/strategies/sports/` |
-| CLI `--sports-rn1` + PM2 | ✅ 默认 dry-run |
-| Live 实盘 | ⏸ 需人工 `--live` + NAV/样本评估 |
+| CLI `--sports-rn1` + PM2 | ✅ **live** 300s |
+| Live 实盘 | ✅ PM2 `--live`（≤1% NAV，RN1 strict） |
 
-**仍缺：** WebSocket Maker、双边库存、Dashboard 体育面板、60 天对照实验。
+**仍缺：** WebSocket Maker、双边库存、体育结算 PnL、60 天对照实验。
 
 ---
 
@@ -186,7 +186,7 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；P1 书面结论见 [P1_REVIEW.md](P1_REVIEW.m
 | `polymarket-dashboard` | Streamlit :8501 | — |
 | `polymarket-btc15m` | **`--btc-15m-completeness --live`** | **60s** |
 | `polymarket-ops-alerts` | `ops_alerts.py --loop 120s` | **120s** |
-| `polymarket-sports-rn1` | **`--sports-rn1` dry-run** | **300s** |
+| `polymarket-sports-rn1` | **`--sports-rn1 --live`** | **300s** |
 
 ---
 
@@ -218,7 +218,7 @@ Conservative live（focus 天气+48h，日限 2，门槛不变）
 
 15m live 60s（≤2% NAV/笔，≤12/天；P1 数据仍显示机会极稀）
 
-RN1：L1 dry-run（PM2 sports-rn1）；live 待评估
+RN1：L1 **live**（PM2 sports-rn1，RN1 strict + Dashboard 面板）
 ```
 
 ---

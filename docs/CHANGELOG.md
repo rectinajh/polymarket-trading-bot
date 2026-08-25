@@ -9,6 +9,16 @@ PnL 数字仍记在 [NET_PNL.md](NET_PNL.md)。**阶段计划与决策门**见 [
 
 ---
 
+## 2026-08-26 — 体育 live + Dashboard 面板
+
+**目的：** P4 从 dry-run 切 live；Overview 可视体育扫描与 RN1 确认。
+
+- PM2 `polymarket-sports-rn1` 加 `--live`（仍 ≤1% NAV、RN1 strict）
+- Dashboard `render_sports_rn1_panel`：扫描/RN1 确认/日限/信号表/拒绝原因
+- `scan_stats` 写入 `live` + `rn1_confirm_mode` 字段
+
+---
+
 ## 2026-08-26 — P4 RN1 聪明钱确认（Layer 2）
 
 **目的：** Pinnacle 信号通过后，再与 RN1 成交对齐才下单。

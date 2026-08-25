@@ -39,6 +39,14 @@ from src.strategies.capital_policy import DailyEntryLog, MAX_ENTRIES_PER_DAY, tr
 from src.strategies.orphan_unwind import OrphanRegistry
 from src.clients.relayer_redeem import relayer_configured
 from src.strategies.btc15m_window_pnl import Btc15mWindowPnL, LEDGER_PATH as BTC15M_PNL_PATH
+from src.strategies.scan_stats import ScanStatsLog, DEFAULT_STATS_PATH
+from src.strategies.sports.config import (
+    DEFAULT_LEDGER as SPORTS_LEDGER_PATH,
+    DEFAULT_SCAN_LOG as SPORTS_STATS_PATH,
+    MAX_ENTRIES_PER_DAY as SPORTS_MAX_ENTRIES_PER_DAY,
+    RN1_CONFIRM_MODE,
+    SLEEVE_CAP_PCT,
+)
 from src.utils.ops_metrics import count_since
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -1195,6 +1203,17 @@ def _reject_rows(rejects: dict, limit: int = 8) -> pd.DataFrame:
         "depth_lt_min": "深度不足",
         "thin_size": "深度不足",
         "vol_lt_min": "成交量不足",
+        "rn1_no_confirm": "RN1 未确认（Layer 2）",
+        "not_favorite": "非热门区间",
+        "no_reference": "无 Pinnacle 参考",
+        "no_edge": "edge 不足",
+        "kickoff_soon": "临近开球",
+        "daily_cap": "日限已满",
+        "already_position": "已有持仓",
+        "already_entered_today": "今日已入场",
+        "book_error": "盘口失败",
+        "size_zero": "仓位为 0",
+        "order_error": "下单失败",
     }
     return pd.DataFrame(
         [{"原因": labels.get(k, k), "次数": int(v)} for k, v in items if int(v) > 0]
@@ -1286,6 +1305,158 @@ def render_ops_status_panel(project_root: Path) -> None:
             f"near-miss={exp.get('near_miss_count', 0)} · "
             f"生产门槛仍 **$0.02**"
         )
+    st.markdown("---")
+
+
+    st.markdown("---")
+
+
+def _cycle_trading_day(ts: Optional[str]) -> Optional[str]:
+    """Map cycle ISO timestamp to capital_policy trading day (Asia/Shanghai)."""
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(ts))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return trading_day(dt)
+    except (TypeError, ValueError):
+        return None
+
+
+@st.cache_data(ttl=30)
+def _load_sports_dashboard_data(stats_path: str, ledger_path: str) -> dict:
+    stats: dict = {"cycles": []}
+    sp = Path(stats_path)
+    if sp.exists():
+        try:
+            raw = json.loads(sp.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                stats = raw
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    cycles = stats.get("cycles") or []
+    latest = cycles[-1] if cycles else {}
+    today = trading_day()
+    today_cycles = [c for c in cycles if _cycle_trading_day(c.get("ts")) == today]
+
+    def _sum(key: str) -> int:
+        return sum(int(c.get(key) or 0) for c in today_cycles)
+
+    entries = DailyEntryLog(
+        path=Path(ledger_path),
+        limit=SPORTS_MAX_ENTRIES_PER_DAY,
+    )
+    recent_signals: list = []
+    for c in reversed(cycles[-20:]):
+        for sig in c.get("signals") or []:
+            if isinstance(sig, dict):
+                recent_signals.append({**sig, "scan_ts": c.get("ts")})
+        if len(recent_signals) >= 15:
+            break
+
+    return {
+        "latest": latest,
+        "today_cycles": len(today_cycles),
+        "today_placed": _sum("placed"),
+        "today_rn1_confirmed": _sum("rn1_confirmed"),
+        "today_opportunities": _sum("opportunities"),
+        "today_deployed_cents": _sum("deployed_cents"),
+        "entries_used": SPORTS_MAX_ENTRIES_PER_DAY - entries.remaining(),
+        "entries_remaining": entries.remaining(),
+        "recent_signals": recent_signals[:15],
+    }
+
+
+def render_sports_rn1_panel(project_root: Path) -> None:
+    """RN1 sports sleeve: Pinnacle + smart-money confirm + scan stats."""
+    stats_path = project_root / SPORTS_STATS_PATH
+    ledger_path = project_root / SPORTS_LEDGER_PATH
+    data = _load_sports_dashboard_data(str(stats_path), str(ledger_path))
+    latest = data["latest"] or {}
+    is_live = bool(latest.get("live"))
+
+    st.subheader("⚽ RN1 体育 Maker")
+    mode_label = "**live**" if is_live else "dry-run"
+    st.caption(
+        f"模式 {mode_label} · RN1 确认 **{latest.get('rn1_confirm_mode', RN1_CONFIRM_MODE)}** · "
+        f"袖套 ≤{SLEEVE_CAP_PCT*100:.0f}% NAV · 日限 {SPORTS_MAX_ENTRIES_PER_DAY} · "
+        f"最近扫描 {_format_scan_ts(latest.get('ts'))}"
+    )
+    if is_live:
+        st.warning(
+            "体育袖套为 **live**（方向性风险）。门槛：Pinnacle edge + RN1 确认。"
+        )
+
+    if not latest:
+        st.info(
+            "尚无体育扫描记录。启动 `polymarket-sports-rn1` 后写入 "
+            f"`{SPORTS_STATS_PATH}`。"
+        )
+        st.markdown("---")
+        return
+
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    with c1:
+        st.metric("扫描市场", latest.get("scanned", "—"))
+    with c2:
+        st.metric("Pinnacle 有机会", latest.get("opportunities", 0))
+    with c3:
+        st.metric("RN1 确认", latest.get("rn1_confirmed", 0))
+    with c4:
+        st.metric("今日下单", data["today_placed"])
+    with c5:
+        dep = int(data["today_deployed_cents"] or 0)
+        st.metric("今日部署", f"${dep/100:.2f}")
+    with c6:
+        st.metric(
+            "日限",
+            f"{data['entries_used']}/{SPORTS_MAX_ENTRIES_PER_DAY}",
+            delta=f"剩 {data['entries_remaining']}",
+        )
+
+    q = latest.get("odds_quota") or {}
+    if q.get("remaining"):
+        st.caption(
+            f"Odds API 配额剩余 **{q.get('remaining')}** · "
+            f"Pinnacle 参考场 **{latest.get('reference_events', '—')}** · "
+            f"RN1 缓存 **{latest.get('rn1_trades_cached', '—')}** 笔/24h"
+        )
+
+    with st.expander("最近一轮明细", expanded=False):
+        st.markdown(
+            f"- 热门区间 **{latest.get('favorite_band', 0)}** · "
+            f"匹配参考 **{latest.get('matched_reference', 0)}** · "
+            f"尝试 **{latest.get('attempted', 0)}** · "
+            f"placed **{latest.get('placed', 0)}** · "
+            f"错误 **{latest.get('errors', 0)}**\n"
+            f"- 耗时 {_format_elapsed_s(latest.get('elapsed_s'))}s · "
+            f"entries_remaining **{latest.get('entries_remaining', '—')}**"
+        )
+        rej = _reject_rows(latest.get("rejects") or {}, limit=12)
+        if not rej.empty:
+            st.markdown("**拒绝原因（本轮）**")
+            st.dataframe(rej, hide_index=True, width="stretch")
+
+    if data["recent_signals"]:
+        with st.expander("近期信号（含 RN1 确认）", expanded=True):
+            rows = []
+            for s in data["recent_signals"]:
+                rows.append(
+                    {
+                        "时间": _format_scan_ts(s.get("scan_ts")),
+                        "球队": s.get("team"),
+                        "日期": s.get("date"),
+                        "Maker": s.get("maker"),
+                        "Pinn": s.get("fair"),
+                        "edge": s.get("edge"),
+                        "RN1价": s.get("rn1_price"),
+                        "对阵": s.get("match"),
+                    }
+                )
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
     st.markdown("---")
 
 
@@ -1576,6 +1747,7 @@ def show_overview(performance_data, positions, system_health_data, open_orders=N
     open_orders = open_orders or []
 
     render_ops_status_panel(PROJECT_ROOT)
+    render_sports_rn1_panel(PROJECT_ROOT)
     render_btc15m_panel(PROJECT_ROOT)
     render_conservative_scan_panel(PROJECT_ROOT)
 
