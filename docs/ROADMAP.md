@@ -24,6 +24,7 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；P1 书面结论见 [P1_REVIEW.md](P1_REVIEW.m
 | **P3** | 8/21 起 | BTC+ETH 15m Completeness | **✅ live 60s**（P1 曾建议 dry-run；**8/26 用户改回 live**） |
 | **P4** | **8/26 起** | RN1 体育 Maker | **🟡 L1 live**；**L2 排队** → [P4_L2_NEXT.md](P4_L2_NEXT.md) |
 | **P5** | 贯穿 | 工程债 / 运维 | **✅ 核心已完成**（告警/Discord/redeem/M3/M4）；见 [未完成清单](#未完成--待办) |
+| **P6** | **8/26 起** | 运营观察 + 待决决策 | **🟡 进行中** → [下一步规划](#下一步规划p6-运营观察期) |
 
 ---
 
@@ -222,7 +223,115 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；P1 书面结论见 [P1_REVIEW.md](P1_REVIEW.m
 2026-08-26  P2 + P5 核心完成；P4 L1 live + PnL/停损/Discord
             P4 L2（WebSocket + 双边库存）→ 排队，见 P4_L2_NEXT.md
             → P2.3 降门槛（仅 near-miss>0 + 人工）
+
+2026-08-26  进入 P6 运营观察期（见下节「下一步规划」）
+            → 待决：体育 RN1 strict / event / 暂停
+            → 待议：15m 是否改 dry-run（P1 选项 C）
 ```
+
+---
+
+## 下一步规划（P6 运营观察期）
+
+**原则：** 先运营、再决策、后开发。P0～P5 核心代码已齐；接下来 **2～4 周以跑数据为主**，不急于加功能。  
+**资金现实：** NAV ~$119 适合验证逻辑，不适合 P4 L2 或冲成交式降门槛。
+
+### 现状快照（2026-08-26）
+
+| 袖套 | PM2 | 数据结论 |
+|---|---|---|
+| **Conservative** | live 240s | P0 观察窗 **0 笔** — 市况偏贵，等天气窗口，**正常** |
+| **15m Completeness** | live 60s | **2000 轮 0 成交**；combined≥0.98 占绝大多数 |
+| **体育 RN1 L1** | live 300s strict | 有 Pinnacle edge，**`rn1_no_confirm` 挡单**；90 天实验刚启，**0 笔结算** |
+| **P2.3 降门槛** | ops 每轮写入 | `near_miss=0` → **skipped**，**不改** live 门槛 |
+| **P4 L2** | — | NAV < $500 → **不写代码**（见 [P4_L2_NEXT.md](P4_L2_NEXT.md)） |
+
+**运维告警：** `polymarket-bot` / `dashboard` 重启次数偏高 → 见下方「第三优先级」。
+
+---
+
+### 第一优先级：运营观察（几乎不写代码）
+
+**目标：** 三条 live 袖套各自产出可复盘数据。
+
+**每周固定看：**
+
+| 袖套 | 文件 / 面板 |
+|---|---|
+| Conservative | `data/scan_stats.json` · Dashboard Overview |
+| 15m | `data/scan_stats_btc15m.json` · `btc15m_window_pnl.json` |
+| 体育 | `data/scan_stats_sports.json` · `data/sports_pnl.json` |
+| 全局 | `data/ops_alerts.json`（429、PM2 重启、NAV） |
+
+| 动作 | 决策 |
+|---|---|
+| **Conservative** | 维持 P1 **选项 A** — 不改 `MIN_EDGE` / 0.98；空仓 = 风控在工作 |
+| **体育 L1** | 跑满 **90 天实验**（起点 2026-08-26）；留意 Odds API 配额 |
+| **P2.3** | 仅当 `near_miss_count > 0` 才讨论降门槛；须 **人工确认** |
+
+---
+
+### 第二优先级：待决运营决策（建议本周定）
+
+体育 **strict** 下有 edge、无成交 — **预期行为**。三选一：
+
+| 选项 | 做法 | 适合若… |
+|---|---|---|
+| **A 保持 strict** | 不改 `.env` | 验证「Pinnacle + RN1 对齐」最严 hypothesis；接受长期 0 笔 |
+| **B 改 `event` 模式** | `RN1_CONFIRM_MODE=event` + PM2 重启 | L1 阶段**先积累样本**；接受更多噪声 |
+| **C 暂停体育 live** | `pm2 stop polymarket-sports-rn1` | 省 Odds API / 注意力留给 Conservative |
+
+**文档建议（非强制）：** 若 90 天内要判定体育路线是否值得 → **B** 跑 2～4 周并保留 strict 拒绝统计对照；若复制 RN1 最严逻辑 → **A**。
+
+| 项 | 状态 |
+|---|---|
+| 体育 RN1 模式 | ⏳ **待决**（A / B / C） |
+| 15m live vs dry-run | ⏳ **待议**（P1 书面推荐 C；当前仍为 live） |
+
+---
+
+### 第三优先级：可选工程（有开发时间再做）
+
+按 ROI 排序；**均无触发则不启动**。
+
+| # | 项 | 价值 | 触发条件 |
+|---|---|---|---|
+| 1 | **15m 改 dry-run** | 省 API、减 orphan 风险 | 继续 0 成交 + 用户接受 P1 选项 C |
+| 2 | **查 PM2 重启根因** | 稳定性 | `ops_alerts` 持续 warning |
+| 3 | **P2.1 选池再优化** | 少打 `no_real_ask` | Conservative API 压力高 |
+| 4 | Dashboard 体育周报 | 自动汇总 strict 拒绝率 / Odds 配额 | 纯运营便利 |
+
+**明确不做（除非数据变）：**
+
+- 自动降 `MIN_EDGE`（P2.3 仍 skipped）
+- P4 L2 WebSocket / 双边 Maker 库存
+- 放宽 Completeness **0.98**
+- 月榜 #1 式大单 event、AI 方向性（见 [STRATEGY_MODES_AND_LEARNING.md](STRATEGY_MODES_AND_LEARNING.md)）
+
+---
+
+### 时间线
+
+```text
+现在 ～ 2 周
+  ├─ 运营：三袖套 live 观察 + 每周看 Dashboard / ops_alerts
+  ├─ 决策：体育 strict vs event vs 暂停（本周定）
+  └─ 可选：15m 是否改 dry-run
+
+2 ～ 4 周
+  ├─ 体育：若有成交 → 看 sports_pnl 首笔结算
+  ├─ Conservative：等天气窗口是否再现 edge
+  └─ near_miss > 0 → 才讨论 P2.3（仍须人工）
+
+30 天+
+  ├─ 复盘体育 L1：ROI、回撤、笔数、RN1 确认命中率
+  └─ NAV ≥ $500 且 L1 稳定 → 评估 P4 L2（见 P4_L2_NEXT.md）
+
+90 天（sports_guard 实验到期）
+  └─ 宣布体育路线：继续 / 暂停 / 改模式
+```
+
+**若只能做一件事：** 定体育 **RN1 确认模式**（strict / event / 暂停）— 决定 L1 实验能否产出可判定样本。
 
 ---
 
@@ -255,4 +364,4 @@ RN1 L1 live（PM2 sports-rn1，strict，Dashboard）
 
 ---
 
-*最后更新：2026-08-26 — P4 L1 live；**L2（WebSocket + 双边库存）排队** → [P4_L2_NEXT.md](P4_L2_NEXT.md)。*
+*最后更新：2026-08-26 — P6 运营观察期规划；P4 L2 排队 → [P4_L2_NEXT.md](P4_L2_NEXT.md)。*

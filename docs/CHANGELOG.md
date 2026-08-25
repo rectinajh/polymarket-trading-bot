@@ -9,6 +9,15 @@ PnL 数字仍记在 [NET_PNL.md](NET_PNL.md)。**阶段计划与决策门**见 [
 
 ---
 
+## 2026-08-26 — P6 运营观察期规划（ROADMAP）
+
+**目的：** 代码 sprint 收尾后进入「先运营、再决策、后开发」阶段；待决项写入路线图。
+
+- [ROADMAP.md](ROADMAP.md) 新增 **P6** 与「下一步规划」：每周检查清单、体育 RN1 模式待决、可选工程与时间线
+- 待决：体育 `strict` / `event` / 暂停；15m live vs dry-run
+
+---
+
 ## 2026-08-26 — P4 L2 排队（WebSocket + 双边 Maker 库存）
 
 **目的：** L1 范围冻结；WebSocket 订单簿与双边 Maker 库存明确为 **下一阶段**，不写代码直至门槛满足。
