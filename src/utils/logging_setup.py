@@ -31,6 +31,10 @@ class _DowngradeNoisyClobFilter(logging.Filter):
             or ("status=404" in msg and "/book" in msg)
             or "Server disconnected" in msg
             or "Could not create api key" in msg
+            or "read operation timed out" in msg.lower()
+            or "ConnectionTerminated" in msg
+            or "EOF occurred in violation of protocol" in msg
+            or "429 Too Many Requests" in msg
         )
         if noisy:
             record.levelno = logging.WARNING

@@ -18,7 +18,8 @@ DEFAULT_LEDGER_PATH = Path("data") / "daily_entries.json"
 # Take this fraction of the top N ask levels so a large NAV cannot eat the book.
 DEPTH_TAKE_PCT = 0.25
 DEPTH_LEVELS = 2
-MAX_ENTRIES_PER_DAY = 6
+# ~$119 NAV: concentrate on 1–2 high-edge entries; six slots overspread small cash.
+MAX_ENTRIES_PER_DAY = 2
 
 # Weather / short-dated favorites stay a satellite sleeve as NAV grows.
 def nav_max_position_pct(nav_cents: int) -> float:

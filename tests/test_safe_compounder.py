@@ -42,22 +42,26 @@ def _market(
     yes_id: str = "yes_t",
     no_id: str = "no_t",
     yes_last: float = 0.05,
+    no_last: float | None = None,
     volume: float = 5_000.0,
     days_to_expiry: float = 5.0,
     neg_risk: bool = False,
     tick_size: float = 0.01,
     category: str = "world",
     tag_ids: tuple[int, ...] = (165,),  # united-states (not in skip list)
-    title: str = "Will X happen?",
+    title: str = "Will the highest temperature in Shanghai be 32°C on August 18?",
 ) -> dict:
     """Build a synthetic Gamma market dict that mirrors what
     `gamma_client._derive_market_fields` would produce."""
     import time
     end_ts = time.time() + days_to_expiry * 86400
+    if no_last is None:
+        # Stay below gamma prefilter gate (no_last < true_no - MIN_EDGE)
+        no_last = min(1.0 - yes_last, (1.0 - yes_last) - 0.02 - 0.005)
     return {
         "_condition_id":   cond,
         "_token_ids":      (yes_id, no_id),
-        "_outcome_prices": (yes_last, 1 - yes_last),
+        "_outcome_prices": (yes_last, no_last),
         "_volume_num":     volume,
         "_end_ts":         end_ts,
         "_category":       category,
@@ -267,7 +271,7 @@ class TestSafeCompounderE2E(unittest.TestCase):
         self.assertEqual(result.get("redeemed"), 1)
         self.assertEqual(len(place), 0)
 
-    def test_daily_cap_six_uncorrelated(self):
+    def test_daily_cap_two_uncorrelated(self):
         names = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf"]
         markets = []
         books = {}
@@ -275,14 +279,14 @@ class TestSafeCompounderE2E(unittest.TestCase):
             yes_id = f"y{i}"
             markets.append(_market(
                 cond=f"0x{i:02x}", yes_id=yes_id, no_id=f"n{i}",
-                yes_last=0.03, days_to_expiry=5.0,
+                yes_last=0.03, days_to_expiry=1.0,
                 title=f"Will {name} proposal pass the council vote?",
             ))
             books[yes_id] = _book(yes_bid=0.07)
         c, client, registered, place = self._build_compounder(markets, books)
         c.dry_run = True
         result = _run(c.run())
-        self.assertEqual(result.get("placed"), 6)
+        self.assertEqual(result.get("placed"), 2)
         self.assertGreaterEqual(result.get("skipped_daily_cap", 0), 1)
 
     def test_weather_cluster_allows_only_one(self):
@@ -372,6 +376,58 @@ class TestSafeCompounderMath(unittest.TestCase):
         self.assertEqual(a, b)
         self.assertEqual(a, "weather:shanghai")
         self.assertEqual(c, "updown:ethereum")
+
+
+class TestCandidatePrefilter(unittest.TestCase):
+    """Gamma-only gates before orderbook HTTP (P2.1)."""
+
+    def test_gamma_no_high_skips_efficient_books(self):
+        c = SafeCompounder(client=MagicMock(), gamma=MagicMock(), dry_run=True)
+        markets = [
+            _market(
+                cond="0xlot",
+                yes_last=0.015,
+                no_last=0.999,
+                title="Will X win election?",
+                days_to_expiry=1.0,
+            ),
+        ]
+        candidates, prefilter = c._find_no_candidates(markets)
+        self.assertEqual(len(candidates), 0)
+        self.assertGreater(prefilter["gamma_no_high"], 0)
+
+    def test_lottery_tail_skipped(self):
+        c = SafeCompounder(client=MagicMock(), gamma=MagicMock(), dry_run=True)
+        markets = [_market(cond="0xlt", yes_last=0.005, no_last=0.90, days_to_expiry=1.0)]
+        _, prefilter = c._find_no_candidates(markets)
+        self.assertGreater(prefilter["lottery_tail"], 0)
+
+    def test_off_focus_skipped(self):
+        c = SafeCompounder(client=MagicMock(), gamma=MagicMock(), dry_run=True)
+        markets = [
+            _market(
+                cond="0xoff",
+                yes_last=0.10,
+                title="Will inflation hit 5%?",
+                days_to_expiry=30.0,
+            ),
+        ]
+        candidates, prefilter = c._find_no_candidates(markets)
+        self.assertEqual(len(candidates), 0)
+        self.assertGreater(prefilter["off_focus"], 0)
+
+    def test_weather_sorted_first(self):
+        c = SafeCompounder(client=MagicMock(), gamma=MagicMock(), dry_run=True)
+        markets = [
+            _market(cond="0xa", yes_last=0.10, title="Will inflation hit 5%?"),
+            _market(
+                cond="0xb",
+                yes_last=0.10,
+                title="Will the highest temperature in Shanghai be 32°C?",
+            ),
+        ]
+        candidates, _ = c._find_no_candidates(markets)
+        self.assertEqual(candidates[0]["ticker"], "0xb")
 
 
 if __name__ == "__main__":

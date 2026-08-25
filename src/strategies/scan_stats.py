@@ -119,6 +119,13 @@ class ScanStatsLog:
         cycles = self._load()["cycles"]
         return cycles[-1] if cycles else None
 
+    def first_recorded_day(self) -> Optional[str]:
+        cycles = self._load()["cycles"]
+        if not cycles:
+            return None
+        first = cycles[0]
+        return first.get("day") or (first.get("ts") or "")[:10] or None
+
     def daily_summary(self, day: Optional[str] = None) -> Dict[str, Any]:
         day = day or trading_day()
         cycles = self.cycles_for_day(day)
@@ -128,6 +135,14 @@ class ScanStatsLog:
 
         def _sum_sc(key: str) -> int:
             return int(sum(_pick(c.get("safe_compounder"), key, default=0) for c in cycles))
+
+        def _sum_sc_prefilter(key: str) -> int:
+            total = 0
+            for c in cycles:
+                pf = (c.get("safe_compounder") or {}).get("prefilter") or {}
+                if isinstance(pf, dict):
+                    total += int(pf.get(key) or 0)
+            return total
 
         def _sum_arb(key: str) -> int:
             return int(sum(_pick(c.get("completeness_arb"), key, default=0) for c in cycles))
@@ -151,11 +166,19 @@ class ScanStatsLog:
                 "total_filled": _sum_sc("filled"),
                 "total_errors": _sum_sc("errors"),
                 "total_redeemed": _sum_sc("redeemed"),
+                "total_redeem_needed": _sum_sc("redeem_needed"),
+                "latest_redeem_needed": _pick(sc_latest, "redeem_needed"),
+                "latest_nav_cents": _pick(sc_latest, "nav_cents"),
                 "rejects": _sum_rejects(cycles, "safe_compounder"),
                 "near_misses": sc_latest.get("near_misses") or [],
                 "near_miss_count": _pick(sc_latest, "near_miss_count"),
                 "top_edge": sc_latest.get("top_edge") or [],
                 "category_breakdown": dict(cat_total.most_common(15)),
+                "prefilter": sc_latest.get("prefilter") or {},
+                "prefilter_today": {
+                    "gamma_no_high": _sum_sc_prefilter("gamma_no_high"),
+                    "lottery_tail": _sum_sc_prefilter("lottery_tail"),
+                },
             },
             "completeness_arb": {
                 "latest_markets_scanned": _pick(arb_latest, "scanned"),
@@ -166,6 +189,7 @@ class ScanStatsLog:
                 "total_unwound": _sum_arb("unwound"),
                 "total_errors": _sum_arb("errors"),
                 "rejects": _sum_rejects(cycles, "completeness_arb"),
+                "prefilter_last_sum": _sum_arb("prefilter_last_sum"),
             },
             "total_filled": _sum_sc("filled") + _sum_arb("filled_pairs"),
         }

@@ -1,16 +1,16 @@
 # 整体开发计划（路线图）
 
-以当前实盘为准：**Conservative 在跑**、NAV≈$119、**观察到 2026-08-25（下周二）**、观察期内**不松策略阈值**。  
-PnL 见 [NET_PNL.md](NET_PNL.md)；模式对比见 [STRATEGY_MODES_AND_LEARNING.md](STRATEGY_MODES_AND_LEARNING.md)；改动记录见 [CHANGELOG.md](CHANGELOG.md)。
+以当前实盘为准：**Conservative + 15m 均为 live**（Conservative focus 池 + 日限 2；15m ≤12/天）、NAV≈**$119**、**P0/P1 已完成**（2026-08-25 复盘）。  
+PnL 见 [NET_PNL.md](NET_PNL.md)；P1 书面结论见 [P1_REVIEW.md](P1_REVIEW.md)；改动见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 
 ## 总原则
 
-1. **一条主线跑稳，再开支线** — 不同时大改 Conservative、上 BTC 15m、上 RN1。
-2. **先有数据，再改代码** — 用 `data/scan_stats.json` + Dashboard「Conservative 扫描观察」攒满观察窗。
-3. **资金量决定策略上限** — ~$119 适合验证逻辑，不适合按「$10–250/15m 区间」类 KPI 验收。
-4. **技术栈** — 继续 Python + 现有 CLOB 客户端；除非 15m 实盘证明延迟是唯一瓶颈，再评估 Go/Rust。
+1. **一条主线跑稳，再开支线** — Conservative 为主；15m 独立 live 袖套（小仓）；RN1 排队。
+2. **先有数据，再改代码** — P0 观察窗已关闭；后续改动需对照 `scan_stats` / Dashboard。
+3. **资金量决定策略上限** — ~$119 适合验证逻辑，不适合「每 15m $10–250」类 KPI。
+4. **质量门槛不动** — `MIN_EDGE=0.02`、`Completeness 0.98` 维持；优化选池与执行，不松风控换成交。
 
 ---
 
@@ -18,198 +18,206 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；模式对比见 [STRATEGY_MODES_AND_LEARNING.
 
 | 阶段 | 时间（建议） | 主题 | 状态 |
 |---|---|---|---|
-| **P0** | 现在 → **2026-08-25** | 观察 + 基线 | **进行中**；Conservative 阈值冻结 |
-| **P1** | 8/25–8/28 | 复盘 + 定价/选池诊断 | 只读分析 → 决定小改或不改 |
-| **P2** | 8/28–9/10 | Conservative 增强（可选） | 选池 / 公允价 / 仪表盘 |
-| **P3** | **2026-08-21 起**（提前） | BTC 15m Completeness 实验 | **干跑已开工**；独立进程 |
-| **P4** | P3 干跑有结论后 | RN1 体育 Maker | 排队；不与 P3 抢主线 |
-| **P5** | 贯穿 | 工程债 / 运维 | 赎回、告警、文档 |
+| **P0** | 8/19 → **8/25** | 观察 + 基线 | **✅ 已完成** |
+| **P1** | **8/25–8/26** | 复盘 + 定价/选池诊断 | **✅ 已完成** → [P1_REVIEW.md](P1_REVIEW.md) |
+| **P2** | **8/26 起** | Conservative 小改（选 B） | **✅ 核心项已完成**；2.2/2.3 按 P1 跳过 |
+| **P3** | 8/21 起 | BTC+ETH 15m Completeness | **✅ live 60s**（P1 曾建议 dry-run；**8/26 用户改回 live**） |
+| **P4** | P3 有结论后再议 | RN1 体育 Maker | **⏸ 未开始**（仍排队） |
+| **P5** | 贯穿 | 工程债 / 运维 | **✅ 核心已完成**（告警/Discord/redeem/M3/M4）；见 [未完成清单](#未完成--待办) |
 
 ---
 
-## P0 — 观察窗（到 2026-08-25）
+## P0 — 观察窗 ✅ 已完成（8/25 关闭）
 
-**目标：** 攒满可解释的空仓/成交证据，不凭感觉改策略。
+**目标：** 攒满可解释的空仓/成交证据。
 
-| 做什么 | 不做 |
+| 通过标准 | 结果 |
 |---|---|
-| 每天看 Dashboard：过 edge、edge 不足（near-miss）、edge 为负、Arb YES+NO≥1、成交、NAV | 改 `MIN_EDGE` / Completeness 阈值 |
-| Bot / Dashboard 保持现状 | 上 RN1、上 15m 主策略 |
-| 仅修故障（进程挂、赎回异常） | 为「多成交」松风控 |
-
-**Near-miss 说明：** `0 < edge < 2¢` 的候选；Dashboard 有数据时才显示「🎯 Near-miss」块，否则看拒绝表里的「edge 不足（0&lt;edge&lt;2¢）」。
-
-**通过标准（周二复盘）：**
-
-- 至少 **5～7 个交易日** 的 `scan_stats` 记录
-- 能回答：near-miss 接近 0 还是变多？成交 0 还是偶发？
-- NAV / 赎回无未解释亏损
+| 5～7 个交易日 `scan_stats` | ✅ 1653+ Conservative 轮次 |
+| near-miss / 成交 / 拒绝可解释 | ✅ near-miss 全程 **0**；成交 **0**；主拒 `edge_negative` + `no_real_ask` |
+| NAV / 赎回无未解释亏损 | ✅ NAV≈$119.38 全现金；无未解释回撤 |
 
 ---
 
-## P1 — 周二复盘 + 诊断（约 2～3 天）
+## P1 — 复盘 + 诊断 ✅ 已完成
 
-**目标：** 决定「空仓正确」还是「模型/选池有问题」。
+**结论（摘要）：** 市况偏贵；公允价公式无系统偏差；**不降** `MIN_EDGE` / Completeness 门槛。
 
-### 工作包
+**决策：**
 
-1. **复盘报告（半天）**  
-   - 按日汇总：扫描、机会、成交、拒绝 Top  
-   - 对照 8/17–8/18 曾成交 vs 近几日全空  
+| 选项 | 决策 |
+|---|---|
+| **A** 维持 Conservative 门槛 | ✅ 采用 |
+| **B** 小改 Conservative（选池/仪表盘） | ✅ 已实施（见 P2） |
+| **C** 15m dry-run 或停 live | P1 书面 **推荐 C**；**8/26 曾执行 dry-run，同日用户 override → live 60s** |
 
-2. **Edge 为负诊断（1～2 天，优先）**  
-   - 抽样 10～20 个 `edge_negative`：YES_last、NO_ask、手算 edge  
-   - 结论三选一：**公允价定义有偏差** / **市况就是贵** / **选池太脏**  
-
-3. **机会密度抽查（半天，只读）**  
-   - BTC 15m：一天内「双边 ask 合计 &lt; 0.98」出现几次  
-   - 决定 P3 是否值得开  
-
-**通过标准：** 书面结论 + 下一阶段选 **A 维持 / B 小改 Conservative / C 开 15m 只读或干跑**。
+完整报告：[P1_REVIEW.md](P1_REVIEW.md) · 脚本：`scripts/p1_review.py --live-edge`
 
 ---
 
-## P2 — Conservative 增强（约 1～2 周，仅当 P1 需要）
+## P2 — Conservative 增强 ✅ 已完成（适用项）
 
-按优先级，**不要一次全做**：
-
-| 顺序 | 项 | 说明 |
+| 顺序 | 项 | 状态 |
 |---|---|---|
-| 2.1 | **选池优化** | 无真实 NO ask / low_conf 提前过滤，少打无效盘口 |
-| 2.2 | **公允价** | 仅当 P1 证明 YES_last 口径有系统偏差时再改 |
-| 2.3 | **参数实验** | **仅当 near-miss 明显增多**：`MIN_EDGE` 单变量干跑 1～2 天 |
-| 2.4 | **仪表盘** | near-miss 为 0 时也显示计数；7 日图标注「有数据日起」 |
-| 2.5 | **Completeness** | 一般不松到 0.99；除非 P1 有明确机会数据 |
+| 2.1 | **选池优化** | ✅ Gamma 预过滤；**天气 + ≤48h** focus 池；查盘 **80**；天气 vol **3000** |
+| 2.2 | **公允价** | ⏭ **跳过**（P1：无偏差） |
+| 2.3 | **MIN_EDGE 实验** | ✅ **框架已接**（`near-miss>0` 时自动分析；**不改** live 门槛） |
+| 2.4 | **仪表盘** | ✅ near-miss 为 0 也显示；7 日图标注数据起始日；预过滤统计 |
+| 2.5 | **Completeness** | ✅ **未放宽** 0.98；查盘 **50**（减 API） |
 
-**不做：** 为冲成交关掉日限 / 深度 / 聚类。
+**同步工程项（P5 交叉）：**
 
-**通过标准：** 过 edge 或成交有可解释改善，或确认「维持空仓」策略正确。
+- Conservative 单轮 **共享 Gamma** 拉取
+- `MAX_ENTRIES_PER_DAY` **6 → 2**
+- Positions API **45s 缓存**（减 429）
+- CLOB 日志降噪（timeout / 429 等）
+- 主 bot 扫描间隔 **240s**
+
+**仍不做：** 为冲成交关日限 / 深度 / 聚类 / 降 `MIN_EDGE`。
 
 ---
 
-## P3 — BTC 15m Completeness 实验（**已提前启动 2026-08-21**）
+## P3 — Crypto 15m Completeness ✅ live 运行中
 
-用户决定提前开 P3；**Conservative 主 bot 不停、不松阈值**。本 sleeve **独立进程 / 独立日限额 / 默认干跑**。
+独立 sleeve；与 Conservative **资金/日限额隔离**（15m 单独 **≤12 笔/天**，Conservative **≤2 笔/天**）。
 
 ### 代码入口
 
 | 资源 | 路径 |
 |---|---|
 | 策略包 | `src/strategies/btc_15m_completeness/` |
-| 发现 | `discover.py` — slug `btc-updown-15m-{unix}` |
-| 执行 | `strategy.py` — Completeness + orphan unwind |
-| CLI | `python cli.py run --btc-15m-completeness --loop --interval 15` |
-| Live | 同上加 `--live`（仅在干跑证明有机会后） |
-| PM2 | `ecosystem.config.cjs` → `polymarket-btc15m`（干跑） |
+| CLI | `cli.py run --btc-15m-completeness --live --loop --interval 60` |
+| PM2 | `polymarket-btc15m` — **`--live`，60s** |
 | 扫描日志 | `data/scan_stats_btc15m.json` |
-| 日限额 | `data/daily_entries_btc15m.json`（与主 bot 隔离） |
 
 ### 里程碑
 
-| 里程碑 | 内容 | 状态 |
+| 里程碑 | 状态 |
+|---|---|
+| M1 发现 slug（BTC+ETH） | ✅ |
+| M2 干跑统计 | ✅ |
+| M2b ETH 并入 | ✅ |
+| M2c 小仓 live（8/21–8/25） | ✅ 曾开；8/26 曾短暂 dry-run；**同日恢复 live** |
+| M3 Orphan unwind | ✅ **超时强平**（`orphan_unwind.py`，120s / 窗口结束前） |
+| M4 结算前清仓 / 区间 PnL | ✅ **区间 PnL 台账** + Dashboard（清仓与 M3 共用 orphan sweep） |
+| M5 观察至 8/25 复盘 | ✅ **0 成交**；P1 建议 dry-run；**运营：live 继续** |
+
+**P1 数据：** 2000 轮、0 成交；combined≥0.98 占绝大多数。
+
+---
+
+## P4 — RN1 体育 Maker ⏸ 未开始
+
+P3 结论为机会密度≈0；~$119 不适合开 P4。详见 [SPORTS_EXPERIMENT_COSTS.md](SPORTS_EXPERIMENT_COSTS.md)。
+
+---
+
+## P5 — 工程与运维 ✅ 核心已完成
+
+| 项 | 状态 |
+|---|---|
+| 赎回 / 僵尸仓 | ✅ Safe Compounder inventory + redeem 基础 |
+| CLOB → data-api fallback | ✅ |
+| `scan_stats` + Dashboard | ✅ 含 P2.4、运维面板、15m PnL |
+| P1 报告 / 文档同步 | ✅ 本文件 + CHANGELOG + NET_PNL |
+| 系统化告警（PM2/429/NAV） | ✅ `ops_alerts.py` + PM2 120s |
+| Discord 推送 | ✅ `warning` 级已开（`POLYMARKET_DISCORD_ALERT_LEVEL=warning`） |
+| Redeem 提醒 | ✅ Dashboard + 日志 + scan_stats + Discord |
+| **Proxy Relayer 自动 redeem** | ✅ `relayer_redeem.py` + `manage_inventory` + `scripts/redeem_all.py` |
+| P3 M3 orphan 超时强平 | ✅ `orphan_unwind.py` + **btc15m + completeness_arb** |
+| P3 M4 15m 区间 PnL | ✅ `btc15m_window_pnl.json` + Dashboard |
+
+**仍缺（见下节）：** 等数据/资金再开的策略项（P4 RN1）。
+
+---
+
+## 未完成 / 待办
+
+按优先级与触发条件分组（2026-08-26 快照）。
+
+### 工程 / 运维
+
+| 项 | 状态 |
+|---|---|
+| **Git 提交/推送** | 人工 |
+
+### 等数据再考虑（P1 门槛）
+
+| 项 | 触发条件 | 现状 |
 |---|---|---|
-| M1 | 市场发现：slug 对齐 15m 窗 | **已做** |
-| M2 | 双边定价 + FOK 干跑统计 | **已做（干跑）** |
-| M3 | Orphan：第二腿失败 unwind Up | **基础已做**；超时强平待加强 |
-| M4 | 结算前清仓 / 区间 PnL 台账 | 待做 |
-| M5 | 干跑 ≥2 天 → 小仓 `--live` | 进行中 |
+| **P2.3 降 MIN_EDGE 执行** | 实验 `recommendation` + 人工确认 | 框架已跑；**near-miss=0 时 skipped**；live 仍 **0.02** |
+| **P2.2 公允价调整** | P1 诊断发现系统偏差 | **跳过** |
+| **降 `MIN_EDGE` / 放宽 0.98** | 有 near-miss 或 P1 支持 | **明确不做**（自动） |
 
-### 与外包帖子的关系
+### 等资金再开（~$119 不适合）
 
-- **策略类型可做**：与现有 `completeness_arb.py` 同族，专用 15m 调度。
-- **验收标准不可承诺**：「每 15m 均赚 $10–250」在 ~$119 NAV 下不现实。
-- **自有验收指标**：有机会次数、腿失败率、区间盈亏分布、orphan 处理成功率。
+| 项 | 建议门槛 | 现状 |
+|---|---|---|
+| **P4 RN1 体育 Maker** | NAV **≥ $500** 且独立运维带宽 | **⏸ 未开始**，见 [SPORTS_EXPERIMENT_COSTS.md](SPORTS_EXPERIMENT_COSTS.md) |
 
-**硬约束：** 主 bot Conservative **继续跑**；资金 / 进程隔离；**先干跑再 live**。
-
-**通过标准：** 干跑 ≥2 天无逻辑事故；小仓 ≥3 天腿失败率可控；再谈加仓。
-
----
-
-## P4 — RN1 体育 Maker（排队，P3 干跑有结论后再开）
-
-**不与 P3 并行大开发。** P3 证明「短周期 Completeness 机会密度」后，再开 RN1。  
-成本与条件见 [SPORTS_EXPERIMENT_COSTS.md](SPORTS_EXPERIMENT_COSTS.md)。
-
-**开发顺序：**
-
-1. 赔率 API + 赛事名匹配  
-2. Maker 双边挂单引擎  
-3. 赛事日历 / 开球时段  
-4. WebSocket + adverse selection  
-5. 独立 PnL / PM2  
-
-**不做：** 用 $100 验证能否「复制榜一 RN1」；P3 干跑未完成前不写 RN1 主代码。
-
----
-
-## P5 — 工程与运维（贯穿）
+### 运营观察（非开发）
 
 | 项 | 说明 |
 |---|---|
-| 赎回 / 僵尸仓 | 已有基础；观察窗内盯告警 |
-| 成交拉取 | CLOB 超时 → data-api fallback（已上） |
-| 扫描统计 | `scan_stats.json` + Dashboard Overview |
-| 文档 | CHANGELOG / NET_PNL 按周补；阶段结束更新本路线图 |
-| 发布 | 改策略或新进程 → 同步 `/www` + `pm2 restart` + push |
+| Conservative **0 成交** | 市况偏贵；focus 池 + 日限 2 已上线，等天气类窗口 |
+| 15m **0 成交** | P1：2000 轮；live 继续但机会极稀 |
+| PM2 **重启次数** | `ops_alerts` 会 warning；需时查 `pm2 logs` |
 
 ---
 
-## 资源与决策门
+## 当前 PM2 配置（`/www`）
+
+| 进程 | 模式 | 间隔 |
+|---|---|---|
+| `polymarket-bot` | `--conservative --live` | **240s** |
+| `polymarket-dashboard` | Streamlit :8501 | — |
+| `polymarket-btc15m` | **`--btc-15m-completeness --live`** | **60s** |
+| `polymarket-ops-alerts` | `ops_alerts.py --loop 120s` | **120s** |
+
+---
+
+## 决策门（已执行）
 
 ```text
-资金 ~$119
-  → P0/P1/P2 足够
-  → P3 只能「验证」，不能「达标外包 KPI」
-  → P4 建议另筹 $500～5k+
+2026-08-25  P0 关闭 → P1 复盘
+            → A 维持 2¢/0.98
+            → B 小改选池（已完成）
+            → C 15m 书面推荐 dry-run
 
-同时最多 1 个「改策略」主题 + 1 个小修
-
-决策门：
-  2026-08-25  → Conservative 复盘（A/B）；P3 已提前干跑
-  P3 干跑过关 → 开不开小仓 `--live`
-  资金到位 + P3 有结论 → 开不开 P4 RN1
+2026-08-26  P2 + P5 核心完成（告警/Discord/redeem/M3/M4）
+            15m + Conservative 均 live
+            → 未完成见上文「未完成 / 待办」：
+               · P4 RN1（$500+ 再议）
+               · P2.3 降门槛（仅 near-miss>0 + 人工）
+               · Completeness orphan ✅ · Discord warning ✅ · P2.3 框架 ✅
 ```
 
 ---
 
-## 默认路径（少纠结版）
+## 默认路径（当前）
 
 ```text
-现在 ──P0 Conservative 观察──► 8/25 复盘
- │
- └── P3 BTC 15m 干跑（已开，独立）──► 有机会密度？
-                                      ├─ 是 → 小仓 live → 再谈加仓
-                                      └─ 否 → 停 sleeve；再评估 P4 RN1 是否值得
+Conservative live（focus 天气+48h，日限 2，门槛不变）
+        │
+        ├─ 有天气 mispricing → 偶发 1～2 笔
+        └─ 无 edge → 空仓（正常）
+
+15m live 60s（≤2% NAV/笔，≤12/天；P1 数据仍显示机会极稀）
+
+RN1：排队，不开
 ```
 
 ---
 
-## 近期日历
-
-| 日期 | 动作 |
-|---|---|
-| **8/21 起** | P3 干跑：`pm2 start polymarket-btc15m` 或 CLI；主 bot 不动 |
-| 今～8/24 | Conservative 只观察 |
-| **8/25（二）** | Conservative 复盘；看 P3 干跑机会统计 |
-| 8/26 后 | 按数据决定 P3 live / 维持干跑 / 停；RN1 仍排队 |
-
----
-
-## 相关代码与文档
+## 相关文档
 
 | 资源 | 路径 |
 |---|---|
-| Conservative 入口 | `cli.py --conservative --loop` |
-| **BTC 15m sleeve** | `cli.py run --btc-15m-completeness --loop --interval 15` |
-| Safe Compounder | `src/strategies/safe_compounder.py` |
-| Completeness Arb | `src/strategies/completeness_arb.py` |
-| BTC 15m 包 | `src/strategies/btc_15m_completeness/` |
-| 扫描统计 | `src/strategies/scan_stats.py` → `data/scan_stats.json` |
-| 15m 扫描日志 | `data/scan_stats_btc15m.json` |
-| Dashboard | `scripts/trading_dashboard.py` |
-| Edge 诊断脚本 | `scripts/edge_diagnostic.py` |
+| P1 复盘 | [P1_REVIEW.md](P1_REVIEW.md) |
+| 净利润台账 | [NET_PNL.md](NET_PNL.md) |
+| 改动记录 | [CHANGELOG.md](CHANGELOG.md) |
+| Edge 诊断 | `scripts/edge_diagnostic.py` · `scripts/p1_review.py` |
 
 ---
 
-*最后更新：2026-08-21 — P3 BTC 15m 干跑提前启动；Conservative 观察仍至 2026-08-25；RN1 排队。*
+*最后更新：2026-08-26 — **Relayer 自动 redeem** 上线；P0～P5 核心完成。*

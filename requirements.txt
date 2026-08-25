@@ -16,6 +16,8 @@ pycryptodome==3.20.0
 # CLOB SDK V2 (order placement, signing, cancellation, orderbook)
 # Legacy py-clob-client (V1) is archived and rejected by production CLOB.
 py-clob-client-v2>=1.0.0
+# Official SDK: gasless redeem/split/merge for deposit (proxy) wallets
+polymarket-client>=0.6.0
 # web3.py: collateral balance reads, allowances, EIP-712 helpers
 web3>=6.15.0
 # eth-account is pulled in by web3, pinned here for clarity

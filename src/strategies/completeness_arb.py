@@ -28,6 +28,11 @@ from src.strategies.capital_policy import (
     nav_max_position_pct,
     size_shares,
 )
+from src.strategies.orphan_unwind import (
+    OrphanRegistry,
+    process_orphans,
+    register_partial_fail,
+)
 from src.strategies.safe_compounder import nav_cents
 from src.utils.market_quality import should_skip_market_title
 
@@ -38,7 +43,8 @@ MAX_COMBINED_ASK = 0.98
 MIN_PROFIT_PER_SHARE = 0.02  # 1 - combined >= this
 MIN_VOLUME = 5000.0
 MAX_NOTIONAL_PCT = 0.02  # extra ceiling vs NAV-tier cap
-MAX_MARKETS_TO_CHECK = 150
+# Opportunistic sleeve; small account — fewer book calls, SC gets API budget.
+MAX_MARKETS_TO_CHECK = 50
 MIN_ASK_SIZE = 5.0
 BOOK_BATCH_SIZE = 8
 
@@ -108,8 +114,13 @@ class CompletenessArb:
         self.min_profit = min_profit
         self.min_volume = min_volume
         self._entries = entry_log or DailyEntryLog()
+        self._orphans = OrphanRegistry()
 
-    async def run(self, dry_run: Optional[bool] = None) -> Dict[str, Any]:
+    async def run(
+        self,
+        dry_run: Optional[bool] = None,
+        markets: Optional[List[Dict]] = None,
+    ) -> Dict[str, Any]:
         if dry_run is not None:
             self.dry_run = dry_run
 
@@ -121,9 +132,14 @@ class CompletenessArb:
             "attempted": 0,
             "filled_pairs": 0,
             "unwound": 0,
+            "partial_fail": 0,
+            "orphan_unwound": 0,
+            "orphan_forced": 0,
+            "orphan_pending": 0,
             "errors": 0,
             "deployed_cents": 0,
             "expected_profit_cents": 0,
+            "prefilter_last_sum": 0,
         }
 
         print("\n📐 COMPLETENESS ARB — YES+NO asks < $1", flush=True)
@@ -138,19 +154,38 @@ class CompletenessArb:
         bal = await self.client.get_balance()
         cash, mtm, nav = nav_cents(bal)
 
-        markets = await self.gamma.get_markets(
-            active=True,
-            closed=False,
-            archived=False,
-            accepting_orders=True,
-            order="volume24hr",
-            ascending=False,
-            max_results=800,
+        orphan_stats = await process_orphans(
+            self.client,
+            dry_run=self.dry_run,
+            registry=self._orphans,
         )
-        stats["scanned"] = len(markets)
+        stats["orphan_unwound"] = orphan_stats.get("unwound", 0)
+        stats["orphan_forced"] = orphan_stats.get("forced", 0)
+        stats["orphan_pending"] = len(self._orphans.list())
+        if orphan_stats.get("pending") or orphan_stats.get("unwound") or orphan_stats.get("forced"):
+            print(
+                f"   Orphan sweep: pending={orphan_stats.get('pending', 0)} "
+                f"unwound={stats['orphan_unwound']} forced={stats['orphan_forced']}",
+                flush=True,
+            )
+
+        if markets is not None:
+            raw_markets = markets
+            stats["scanned"] = len(raw_markets)
+        else:
+            raw_markets = await self.gamma.get_markets(
+                active=True,
+                closed=False,
+                archived=False,
+                accepting_orders=True,
+                order="volume24hr",
+                ascending=False,
+                max_results=800,
+            )
+            stats["scanned"] = len(raw_markets)
 
         candidates: List[Dict] = []
-        for m in markets:
+        for m in raw_markets:
             title = m.get("question") or ""
             skip, reason = should_skip_market_title(title)
             if skip:
@@ -158,6 +193,15 @@ class CompletenessArb:
             vol = float(m.get("_volume_num") or m.get("volume") or 0)
             if vol < self.min_volume:
                 continue
+            prices = m.get("_outcome_prices")
+            if prices and len(prices) >= 2:
+                try:
+                    last_sum = float(prices[0]) + float(prices[1])
+                    if last_sum >= self.max_combined:
+                        stats["prefilter_last_sum"] += 1
+                        continue
+                except (TypeError, ValueError):
+                    pass
             cond = m.get("_condition_id") or m.get("conditionId") or ""
             yes_tok, no_tok = m.get("_token_ids", ("", ""))
             if not cond or not yes_tok or not no_tok:
@@ -177,7 +221,11 @@ class CompletenessArb:
             })
 
         candidates = candidates[:MAX_MARKETS_TO_CHECK]
-        print(f"   Checking books on {len(candidates)} liquid markets...", flush=True)
+        print(
+            f"   Checking books on {len(candidates)} liquid markets "
+            f"(prefilter last-sum≥${self.max_combined:.2f}: {stats['prefilter_last_sum']})...",
+            flush=True,
+        )
 
         opps: List[Dict] = []
         rejects: Counter = Counter()
@@ -280,6 +328,8 @@ class CompletenessArb:
                     cash -= cost
                 elif result == "unwound":
                     stats["unwound"] += 1
+                elif result == "partial_fail":
+                    stats["partial_fail"] += 1
                 # Only one live two-leg attempt per cycle to limit unmatched-leg risk
                 if not self.dry_run and result in ("filled", "unwound", "partial_fail"):
                     break
@@ -308,6 +358,7 @@ class CompletenessArb:
             logger.info("Completeness rejects: %s", reject_txt)
         stats["rejects"] = dict(rejects)
         stats["elapsed_s"] = round(elapsed, 1)
+        stats["orphan_pending"] = len(self._orphans.list())
         return stats
 
     async def _execute_pair(self, opp: Dict) -> str:
@@ -403,4 +454,12 @@ class CompletenessArb:
                 return "unwound"
             except Exception as unwind_exc:
                 print(f"  ❌ Unwind failed on {ticker}: {unwind_exc}", flush=True)
+                register_partial_fail(
+                    condition_id=ticker,
+                    filled_side="yes",
+                    quantity=shares,
+                    entry_cents=yes_cents,
+                    strategy="completeness_arb",
+                    slug=(opp.get("title") or "")[:40],
+                )
                 return "partial_fail"

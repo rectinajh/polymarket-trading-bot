@@ -24,6 +24,8 @@ from src.strategies.capital_policy import top_ask_depth
 async def _scan_edges(compounder: SafeCompounder):
     markets = await compounder._fetch_all_markets()
     candidates = compounder._find_no_candidates(markets)
+    if isinstance(candidates, tuple):
+        candidates, _prefilter = candidates
 
     near_misses = []
     rejects = Counter()

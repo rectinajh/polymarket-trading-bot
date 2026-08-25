@@ -55,6 +55,19 @@ class TestScanStatsLog(unittest.TestCase):
         self.assertEqual(summary["total_filled"], 2)
         self.assertEqual(summary["safe_compounder"]["rejects"]["edge_lt_min"], 5)
 
+    def test_daily_summary_redeem_needed(self) -> None:
+        ts = datetime(2026, 8, 26, 10, 0, tzinfo=CN)
+        self.log.record_conservative_cycle(
+            {"redeem_needed": 2, "nav_cents": 11938},
+            {},
+            now=ts,
+        )
+        summary = self.log.daily_summary("2026-08-26")
+        sc = summary["safe_compounder"]
+        self.assertEqual(sc["latest_redeem_needed"], 2)
+        self.assertEqual(sc["total_redeem_needed"], 2)
+        self.assertEqual(sc["latest_nav_cents"], 11938)
+
     def test_trims_old_cycles(self) -> None:
         from src.strategies import scan_stats as mod
 

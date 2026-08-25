@@ -74,6 +74,46 @@ class TestConstruction(unittest.TestCase):
         self.assertIsNotNone(c)
 
 
+class TestPositionsCache(unittest.TestCase):
+    """get_positions reuses a short TTL cache to reduce data-api 429."""
+
+    def test_positions_cached_within_ttl(self):
+        import time
+
+        c = PolymarketClient(private_key=DUMMY_PK)
+        c._positions_cache_ttl_s = 60.0
+        payload = {"market_positions": [{"ticker": "0x1", "size": 1}], "event_positions": []}
+        c._positions_cache = (time.monotonic(), payload)
+
+        async def _fetch():
+            return await c._fetch_positions_cached()
+
+        result = _run(_fetch())
+        self.assertEqual(result["market_positions"][0]["ticker"], "0x1")
+
+    def test_get_positions_filters_by_condition(self):
+        import time
+
+        c = PolymarketClient(private_key=DUMMY_PK)
+        c._positions_cache = (
+            time.monotonic(),
+            {
+                "market_positions": [
+                    {"condition_id": "0xaa", "ticker": "0xaa", "size": 2},
+                    {"condition_id": "0xbb", "ticker": "0xbb", "size": 3},
+                ],
+                "event_positions": [],
+            },
+        )
+
+        async def _one():
+            return await c.get_positions(condition_id="0xbb")
+
+        result = _run(_one())
+        self.assertEqual(len(result["market_positions"]), 1)
+        self.assertEqual(result["market_positions"][0]["ticker"], "0xbb")
+
+
 # --------------------------------------------------------------------------
 # Token-id resolution
 # --------------------------------------------------------------------------

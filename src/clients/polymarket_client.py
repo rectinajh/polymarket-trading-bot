@@ -26,10 +26,11 @@ materialised on first use, so importing this module never fails just because
 import asyncio
 import json
 import os
+import time
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.utils.logging_setup import TradingLoggerMixin
 from src.config.settings import validate_endpoint_url
@@ -262,6 +263,11 @@ class PolymarketClient(TradingLoggerMixin):
         self._gamma = gamma_client
         self._geoblocked = False
         self._geoblock_status: Optional[Dict[str, Any]] = None
+        # Positions data-api is rate-limited; cache briefly within a scan cycle.
+        self._positions_cache: Optional[Tuple[float, Dict[str, Any]]] = None
+        self._positions_cache_ttl_s = float(
+            os.getenv("POLYMARKET_POSITIONS_CACHE_TTL", "45")
+        )
 
         self.logger.info(
             "PolymarketClient initialized (lazy)",
@@ -746,6 +752,22 @@ class PolymarketClient(TradingLoggerMixin):
                                                   # no "event" parent concept
             }
         """
+        full = await self._fetch_positions_cached()
+        if not condition_id:
+            return full
+        positions = [
+            p for p in full.get("market_positions", [])
+            if (p.get("condition_id") or p.get("ticker")) == condition_id
+        ]
+        return {"market_positions": positions, "event_positions": positions}
+
+    async def _fetch_positions_cached(self) -> Dict[str, Any]:
+        """Fetch all positions with a short TTL cache to avoid data-api 429."""
+        now = time.monotonic()
+        cached = self._positions_cache
+        if cached and (now - cached[0]) < self._positions_cache_ttl_s:
+            return cached[1]
+
         addr = self._get_funding_address()
         url = f"{DEFAULT_DATA_HOST}/positions"
         params = {"user": addr}
@@ -756,19 +778,21 @@ class PolymarketClient(TradingLoggerMixin):
                 resp.raise_for_status()
                 raw = resp.json() or []
         except Exception as exc:
+            self._positions_cache = None
+            msg = str(exc).lower()
+            if "429" in msg or "rate limit" in msg:
+                from src.utils.ops_metrics import record_rate_limit
+                record_rate_limit("data-api.positions", detail=str(exc)[:200])
             raise PolymarketAPIError(
                 f"Failed to fetch positions from data-api: {exc}"
             ) from exc
 
         if not isinstance(raw, list):
-            # Some Polymarket endpoints wrap the list in {"data": [...]}.
             raw = raw.get("data", []) if isinstance(raw, dict) else []
 
         positions: List[Dict[str, Any]] = []
         for p in raw:
             cond = p.get("conditionId") or p.get("condition_id")
-            if condition_id and cond != condition_id:
-                continue
             token = str(p.get("asset") or p.get("token_id") or "")
             outcome_idx = p.get("outcomeIndex", p.get("outcome_index", 0))
             side = "YES" if outcome_idx == 0 else "NO"
@@ -778,7 +802,6 @@ class PolymarketClient(TradingLoggerMixin):
             pnl = float(p.get("realizedPnl", p.get("realized_pnl", 0)) or 0)
 
             positions.append({
-                # Polymarket-native fields
                 "condition_id":          cond,
                 "token_id":              token,
                 "side":                  side,
@@ -791,7 +814,6 @@ class PolymarketClient(TradingLoggerMixin):
                 "redeemable":            bool(p.get("redeemable", False)),
                 "negative_risk":         bool(p.get("negativeRisk", p.get("negRisk", False))),
                 "event_slug":            p.get("eventSlug") or "",
-                # legacy legacy-shape aliases for the dashboard / cli
                 "ticker":                cond,
                 "event_ticker":          cond,
                 "position":              int(size) if side == "YES" else -int(size),
@@ -800,24 +822,50 @@ class PolymarketClient(TradingLoggerMixin):
                 "fees_paid_dollars":      "0",
             })
 
-        return {"market_positions": positions, "event_positions": positions}
+        result = {"market_positions": positions, "event_positions": positions}
+        self._positions_cache = (now, result)
+        return result
 
     async def redeem_condition(
         self, condition_id: str, neg_risk: bool = False
     ) -> Dict[str, Any]:
         """Redeem a resolved CTF condition back to collateral.
 
-        EOA wallets (signature_type=0) send `redeemPositions` on-chain.
-        Proxy / deposit wallets hold tokens on the funder, so the EOA cannot
-        redeem directly — callers should treat that as `redeem_needed`.
+        EOA (signature_type=0): on-chain ``redeemPositions`` from the signer.
+        Deposit/proxy wallets: gasless redeem via Polymarket Relayer when
+        ``POLYMARKET_RELAYER_API_KEY`` is configured.
         """
-        if int(self.signature_type or 0) != 0:
-            raise PolymarketAPIError(
-                "Proxy/deposit wallet: redeem in the Polymarket UI or Relayer "
-                f"(condition={condition_id[:18]})"
-            )
         if not condition_id:
             raise PolymarketAPIError("redeem_condition requires condition_id")
+
+        if int(self.signature_type or 0) != 0:
+            from src.clients.relayer_redeem import relayer_configured, redeem_via_relayer
+
+            if not relayer_configured():
+                raise PolymarketAPIError(
+                    "Proxy/deposit wallet: set POLYMARKET_RELAYER_API_KEY + "
+                    "POLYMARKET_RELAYER_API_KEY_ADDRESS, or redeem in Polymarket UI "
+                    f"(condition={condition_id[:18]})"
+                )
+            wallet = self._get_funding_address()
+            try:
+                result = await redeem_via_relayer(
+                    private_key=self.private_key,
+                    wallet=wallet,
+                    condition_id=condition_id,
+                    metadata=f"Polymarket bot redeem {condition_id[:18]}",
+                )
+            except Exception as exc:
+                raise PolymarketAPIError(
+                    f"Relayer redeem failed for {condition_id[:18]}: {exc}"
+                ) from exc
+            self._positions_cache = None
+            self.logger.info(
+                "[Polymarket] Relayer redeem submitted",
+                condition_id=condition_id[:18],
+                tx=result.get("tx_hash"),
+            )
+            return result
 
         def _send():
             from eth_account import Account
@@ -1138,6 +1186,9 @@ class PolymarketClient(TradingLoggerMixin):
             classified = _classify_order_error(exc)
             if isinstance(classified, GeoblockError):
                 self._geoblocked = True
+            if isinstance(classified, RateLimitError):
+                from src.utils.ops_metrics import record_rate_limit
+                record_rate_limit("clob.place_order", detail=str(exc)[:200])
             raise classified from exc
 
         return _normalize_order_response(

@@ -9,11 +9,13 @@ import uuid
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from src.clients.gamma_client import GammaClient
 from src.strategies.btc_15m_completeness.discover import (
-    fetch_btc_15m_markets,
+    DEFAULT_ASSETS,
+    fetch_crypto_15m_markets,
+    normalize_assets,
     seconds_to_window_end,
 )
 from src.strategies.capital_policy import (
@@ -24,6 +26,12 @@ from src.strategies.capital_policy import (
 from src.strategies.completeness_arb import (
     _best_ask,
     evaluate_completeness,
+)
+from src.strategies.btc15m_window_pnl import Btc15mWindowPnL
+from src.strategies.orphan_unwind import (
+    OrphanRegistry,
+    process_orphans,
+    register_partial_fail,
 )
 from src.strategies.safe_compounder import nav_cents
 
@@ -44,7 +52,10 @@ MIN_SECONDS_LEFT = 90
 
 
 class Btc15mCompleteness:
-    """Independent Completeness sleeve for BTC 15m Up/Down markets."""
+    """Independent Completeness sleeve for crypto 15m Up/Down (BTC+ETH).
+
+    Class name kept for CLI/PM2 back-compat. Default assets: btc, eth.
+    """
 
     def __init__(
         self,
@@ -55,6 +66,7 @@ class Btc15mCompleteness:
         min_profit: float = MIN_PROFIT_PER_SHARE,
         entry_log: Optional[DailyEntryLog] = None,
         scan_log_path: Path = DEFAULT_SCAN_LOG,
+        assets: Sequence[str] = DEFAULT_ASSETS,
     ):
         self.client = client
         self.gamma = gamma or GammaClient()
@@ -62,34 +74,47 @@ class Btc15mCompleteness:
         self.dry_run = dry_run
         self.max_combined = max_combined
         self.min_profit = min_profit
+        self.assets = normalize_assets(assets)
         self._entries = entry_log or DailyEntryLog(
             path=DEFAULT_LEDGER, limit=MAX_ENTRIES_PER_DAY,
         )
         self.scan_log_path = Path(scan_log_path)
+        self._window_pnl = Btc15mWindowPnL()
+        self._orphans = OrphanRegistry()
 
     async def run(self, dry_run: Optional[bool] = None) -> Dict[str, Any]:
         if dry_run is not None:
             self.dry_run = dry_run
 
         t0 = time.time()
+        asset_label = "+".join(a.upper() for a in self.assets)
         stats: Dict[str, Any] = {
-            "mode": "btc_15m_completeness",
+            "mode": "crypto_15m_completeness",
+            "assets": list(self.assets),
             "scanned": 0,
             "checked_books": 0,
             "opportunities": 0,
             "attempted": 0,
             "filled_pairs": 0,
             "unwound": 0,
+            "partial_fail": 0,
+            "orphan_unwound": 0,
+            "orphan_forced": 0,
+            "orphan_pending": 0,
             "errors": 0,
             "skipped_expiring": 0,
             "deployed_cents": 0,
             "expected_profit_cents": 0,
             "near_misses": [],
+            "by_asset": {a: {"scanned": 0, "opportunities": 0} for a in self.assets},
             "rejects": {},
         }
         rejects: Counter = Counter()
 
-        print("\n⏱️  BTC 15m COMPLETENESS — Up+Down asks < $1", flush=True)
+        print(
+            f"\n⏱️  CRYPTO 15m COMPLETENESS ({asset_label}) — Up+Down asks < $1",
+            flush=True,
+        )
         print(
             f"   Rules: combined < ${self.max_combined:.2f} | "
             f"min profit ${self.min_profit:.2f}/sh | "
@@ -106,9 +131,39 @@ class Btc15mCompleteness:
         bal = await self.client.get_balance()
         cash, mtm, nav = nav_cents(bal)
 
-        markets = await fetch_btc_15m_markets(self.gamma)
+        orphan_stats = await process_orphans(
+            self.client,
+            dry_run=self.dry_run,
+            min_seconds_left=MIN_SECONDS_LEFT,
+            registry=self._orphans,
+        )
+        stats["orphan_unwound"] = orphan_stats.get("unwound", 0)
+        stats["orphan_forced"] = orphan_stats.get("forced", 0)
+        stats["orphan_pending"] = orphan_stats.get("pending", 0) - (
+            orphan_stats.get("unwound", 0) + orphan_stats.get("forced", 0)
+        )
+        if orphan_stats.get("pending"):
+            print(
+                f"   Orphan sweep: pending={orphan_stats['pending']} "
+                f"unwound={orphan_stats.get('unwound', 0)} "
+                f"forced={orphan_stats.get('forced', 0)}",
+                flush=True,
+            )
+
+        markets = await fetch_crypto_15m_markets(self.gamma, assets=self.assets)
         stats["scanned"] = len(markets)
-        print(f"   Discovered {len(markets)} BTC 15m window(s)", flush=True)
+        for m in markets:
+            a = m.get("_asset") or "unknown"
+            if a in stats["by_asset"]:
+                stats["by_asset"][a]["scanned"] += 1
+        print(
+            f"   Discovered {len(markets)} window(s): "
+            + ", ".join(
+                f"{a.upper()}={stats['by_asset'].get(a, {}).get('scanned', 0)}"
+                for a in self.assets
+            ),
+            flush=True,
+        )
 
         opps: List[Dict] = []
         near: List[Dict] = []
@@ -118,6 +173,7 @@ class Btc15mCompleteness:
             yes_tok, no_tok = m.get("_token_ids") or ("", "")
             title = m.get("question") or m.get("title") or ""
             slug = m.get("_slug") or ""
+            asset = m.get("_asset") or "unknown"
 
             # Skip if too close to resolution for this window.
             wstart = m.get("_window_start")
@@ -141,7 +197,7 @@ class Btc15mCompleteness:
                 ob_resp = await self.client.get_orderbook(cond, depth=5)
                 ob = ob_resp.get("orderbook", {}) or {}
             except Exception as exc:
-                logger.info("BTC15m book fail %s: %s", slug, exc)
+                logger.info("crypto15m book fail %s: %s", slug, exc)
                 rejects["disconnect"] += 1
                 continue
 
@@ -166,6 +222,7 @@ class Btc15mCompleteness:
                     raw_profit = 1.0 - combined
                     if 0 < raw_profit < self.min_profit:
                         near.append({
+                            "asset": asset,
                             "slug": slug,
                             "title": title[:70],
                             "combined": round(combined, 4),
@@ -193,10 +250,16 @@ class Btc15mCompleteness:
                 rejects["size"] += 1
                 continue
 
+            if asset in stats["by_asset"]:
+                stats["by_asset"][asset]["opportunities"] += 1
+
             opps.append({
                 "ticker": cond,
                 "slug": slug,
+                "asset": asset,
                 "title": title[:80],
+                "window_start": wstart if isinstance(wstart, int) else None,
+                "window_end": (wstart + 900) if isinstance(wstart, int) else None,
                 "yes_ask": yes_ask,
                 "no_ask": no_ask,
                 "yes_size": yes_sz,
@@ -212,8 +275,8 @@ class Btc15mCompleteness:
 
         for opp in opps[:5]:
             print(
-                f"  OPP {opp['combined']:.3f} (+${opp['profit_per']:.3f}/sh) "
-                f"x{opp['shares']} | {opp.get('slug')}",
+                f"  OPP [{str(opp.get('asset', '?')).upper()}] {opp['combined']:.3f} "
+                f"(+${opp['profit_per']:.3f}/sh) x{opp['shares']} | {opp.get('slug')}",
                 flush=True,
             )
 
@@ -227,7 +290,9 @@ class Btc15mCompleteness:
                 stats["attempted"] += 1
                 if result in ("filled", "dry"):
                     self._entries.record(
-                        opp["ticker"], opp.get("title") or "", kind="btc15m",
+                        opp["ticker"],
+                        opp.get("title") or "",
+                        kind=f"crypto15m:{opp.get('asset', 'x')}",
                     )
                     remaining -= 1
                 if result == "filled":
@@ -238,12 +303,23 @@ class Btc15mCompleteness:
                         round(opp["profit_per"] * opp["shares"] * 100)
                     )
                     cash -= cost
+                    self._window_pnl.record_fill(
+                        slug=opp.get("slug") or "",
+                        asset=str(opp.get("asset") or ""),
+                        condition_id=opp["ticker"],
+                        shares=int(opp["shares"]),
+                        combined=float(opp["combined"]),
+                        profit_per=float(opp["profit_per"]),
+                        window_start=opp.get("window_start"),
+                    )
                 elif result == "unwound":
                     stats["unwound"] += 1
+                elif result == "partial_fail":
+                    stats["partial_fail"] += 1
                 if not self.dry_run and result in ("filled", "unwound", "partial_fail"):
                     break
             except Exception as exc:
-                logger.error("BTC15m execute failed: %s", exc)
+                logger.error("crypto15m execute failed: %s", exc)
                 stats["errors"] += 1
 
         if self._owns_gamma:
@@ -254,14 +330,26 @@ class Btc15mCompleteness:
         if hasattr(self.client, "flush_token_cache"):
             self.client.flush_token_cache()
 
+        try:
+            pos_resp = await self.client.get_positions()
+            self._window_pnl.update_from_positions(
+                pos_resp.get("market_positions") or []
+            )
+        except Exception as exc:
+            logger.info("crypto15m window pnl update skipped: %s", exc)
+
+        pnl_day = self._window_pnl.summary_for_day()
+        stats["window_pnl"] = pnl_day
+
         elapsed = time.time() - t0
         stats["rejects"] = dict(rejects)
         stats["elapsed_s"] = round(elapsed, 1)
         stats["nav_cents"] = nav
+        stats["orphan_pending"] = len(self._orphans.list())
         self._append_scan_log(stats)
 
         print(
-            f"   BTC15m done: windows={stats['scanned']} books={stats['checked_books']} "
+            f"   crypto15m done: windows={stats['scanned']} books={stats['checked_books']} "
             f"opps={stats['opportunities']} filled={stats['filled_pairs']} "
             f"unwound={stats['unwound']} ({elapsed:.1f}s)",
             flush=True,
@@ -272,7 +360,7 @@ class Btc15mCompleteness:
         if near:
             print(
                 f"   Near-miss (0<profit<{self.min_profit}): {len(near)} "
-                f"best={near[0].get('combined')}",
+                f"best={near[0].get('combined')} [{near[0].get('asset')}]",
                 flush=True,
             )
         return stats
@@ -282,12 +370,13 @@ class Btc15mCompleteness:
         shares = int(opp["shares"])
         yes_cents = int(round(opp["yes_ask"] * 100))
         no_cents = int(round(opp["no_ask"] * 100))
+        tag = f"{str(opp.get('asset', '?')).upper()}|{opp.get('slug')}"
 
         if self.dry_run:
             print(
                 f"  [DRY] Would FOK Up+Down x{shares} @ "
                 f"{opp['yes_ask']:.2f}+{opp['no_ask']:.2f}={opp['combined']:.3f} "
-                f"| {opp.get('slug')}",
+                f"| {tag}",
                 flush=True,
             )
             return "dry"
@@ -306,7 +395,7 @@ class Btc15mCompleteness:
             min_size=MIN_ASK_SIZE,
         )
         if not ok or yes_ask is None or no_ask is None:
-            print(f"  ⏭️ BTC15m stale {opp.get('slug')}: {reason}", flush=True)
+            print(f"  ⏭️ stale {tag}: {reason}", flush=True)
             return "stale"
 
         yes_cents = int(round(yes_ask * 100))
@@ -316,8 +405,7 @@ class Btc15mCompleteness:
             return "stale"
 
         print(
-            f"  ⚡ FOK Up x{shares} @{yes_ask:.2f} then Down @{no_ask:.2f} "
-            f"| {opp.get('slug')}",
+            f"  ⚡ FOK Up x{shares} @{yes_ask:.2f} then Down @{no_ask:.2f} | {tag}",
             flush=True,
         )
 
@@ -351,7 +439,7 @@ class Btc15mCompleteness:
             )
             no_order = (no_resp or {}).get("order") or {}
             if no_order.get("order_id") or int(no_order.get("fill_count") or 0) > 0:
-                print(f"  ✅ BTC15m pair filled x{shares} | {opp.get('slug')}", flush=True)
+                print(f"  ✅ pair filled x{shares} | {tag}", flush=True)
                 return "filled"
             raise RuntimeError(f"Down leg rejected: {no_resp}")
         except Exception as exc:
@@ -366,10 +454,27 @@ class Btc15mCompleteness:
                     type_="market",
                     yes_price=max(1, yes_cents - 2),
                 )
-                print(f"  ↩️ Unwound Up leg | {opp.get('slug')}", flush=True)
+                print(f"  ↩️ Unwound Up leg | {tag}", flush=True)
                 return "unwound"
             except Exception as unwind_exc:
-                print(f"  ❌ Unwind failed | {opp.get('slug')}: {unwind_exc}", flush=True)
+                print(f"  ❌ Unwind failed | {tag}: {unwind_exc}", flush=True)
+                register_partial_fail(
+                    condition_id=ticker,
+                    filled_side="yes",
+                    quantity=shares,
+                    entry_cents=yes_cents,
+                    strategy="crypto15m",
+                    slug=str(opp.get("slug") or ""),
+                    asset=str(opp.get("asset") or ""),
+                    window_end=opp.get("window_end"),
+                    registry=self._orphans,
+                )
+                self._window_pnl.mark_orphan_loss(
+                    condition_id=ticker,
+                    loss_cents=int(round(opp["yes_ask"] * shares * 100)),
+                    slug=str(opp.get("slug") or ""),
+                    asset=str(opp.get("asset") or ""),
+                )
                 return "partial_fail"
 
     def _append_scan_log(self, stats: Dict[str, Any]) -> None:
@@ -396,4 +501,4 @@ class Btc15mCompleteness:
             tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
             tmp.replace(self.scan_log_path)
         except OSError as exc:
-            logger.warning("BTC15m scan log write failed: %s", exc)
+            logger.warning("crypto15m scan log write failed: %s", exc)

@@ -197,6 +197,14 @@ def _run_conservative(
     _apply_live_flags(live_mode)
     scan_log = ScanStatsLog()
 
+    async def _conservative_cycle(sc, arb):
+        """One cycle: single Gamma fetch shared by SC + Completeness."""
+        markets = await sc._fetch_all_markets()
+        sc_stats = await sc.run(markets=markets)
+        arb_stats = await arb.run(markets=markets)
+        scan_log.record_conservative_cycle(sc_stats, arb_stats)
+        return {"safe_compounder": sc_stats, "completeness_arb": arb_stats}
+
     print("🛡️  CONSERVATIVE MODE (Safe Compounder + Completeness Arb)")
     print("   No AI directional / IMMEDIATE trades.")
     if not live_mode:
@@ -210,13 +218,10 @@ def _run_conservative(
             sc = SafeCompounder(
                 client=client, gamma=gamma, dry_run=not live_mode, entry_log=entries,
             )
-            sc_stats = await sc.run()
             arb = CompletenessArb(
                 client=client, gamma=gamma, dry_run=not live_mode, entry_log=entries,
             )
-            arb_stats = await arb.run()
-            scan_log.record_conservative_cycle(sc_stats, arb_stats)
-            return {"safe_compounder": sc_stats, "completeness_arb": arb_stats}
+            return await _conservative_cycle(sc, arb)
 
     async def _run_forever():
         cycle = 0
@@ -235,9 +240,7 @@ def _run_conservative(
                     f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ────"
                 )
                 try:
-                    sc_stats = await sc.run()
-                    arb_stats = await arb.run()
-                    scan_log.record_conservative_cycle(sc_stats, arb_stats)
+                    await _conservative_cycle(sc, arb)
                 except Exception as exc:
                     print(f"Cycle {cycle} failed: {exc}. Continuing after {interval}s.")
                 print(f"\n⏳ Sleeping {interval}s before next cycle...")
@@ -257,13 +260,13 @@ def _run_btc_15m_completeness(
     loop: bool = False,
     interval: int = 15,
 ) -> None:
-    """Independent BTC 15m Completeness sleeve (default dry-run)."""
+    """Independent crypto 15m Completeness sleeve (BTC+ETH; default dry-run)."""
     from src.clients import build_polymarket_clients
     from src.strategies.btc_15m_completeness import Btc15mCompleteness
 
     _apply_live_flags(live_mode)
 
-    print("⏱️  BTC 15m COMPLETENESS SLEEVE")
+    print("⏱️  CRYPTO 15m COMPLETENESS SLEEVE (BTC+ETH)")
     print("   Independent from Conservative. Separate daily_entries_btc15m.json.")
     if not live_mode:
         print("   DRY RUN — no real orders (pass --live to trade)")
@@ -288,7 +291,7 @@ def _run_btc_15m_completeness(
             while True:
                 cycle += 1
                 print(
-                    f"\n──── BTC15m Cycle {cycle} — "
+                    f"\n──── Crypto15m Cycle {cycle} — "
                     f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ────"
                 )
                 try:
@@ -304,7 +307,7 @@ def _run_btc_15m_completeness(
         else:
             asyncio.run(_run_once())
     except KeyboardInterrupt:
-        print("\nBTC 15m sleeve stopped by user.")
+        print("\nCrypto 15m sleeve stopped by user.")
 
 
 def cmd_dashboard(args: argparse.Namespace) -> None:

@@ -9,7 +9,8 @@ STRATEGY:
 - Trade only when edge ≥ MIN_EDGE — FOK take the cheap ask (capture the
   mispricing we measured). Do not rest 1¢ below the ask.
 - Position size: min(25% of top-2 NO asks, NAV-tier cap, half-Kelly)
-- At most 6 new entries per calendar day (Asia/Shanghai); correlated titles share one slot
+- At most 2 new entries per calendar day (Asia/Shanghai); correlated titles share one slot
+- Focus pool: weather + ≤48h expiry; weather vol floor 3000; top 80 orderbook checks
 - No daily PnL target — empty scans are expected
 
 Available via: python cli.py run --safe-compounder
@@ -65,8 +66,16 @@ SKIP_TITLE_PHRASES = [
 # time-heuristic boost — that boost maxed at 4¢ while the old 5¢ gate
 # made live scans return zero opportunities on efficient books.
 MIN_VOLUME = 5000
+MIN_VOLUME_WEATHER = 3000
+# Focus pool: align with historical fills (Shanghai weather) + near-term markets.
+FOCUS_MAX_HOURS = 48.0
+MAX_ORDERBOOK_CHECKS = 80
 MIN_NO_ASK = 0.80
 MIN_EDGE = 0.02
+# Pre-filter before orderbook: need NO_ask <= (1 - YES_last) - MIN_EDGE and NO_ask >= MIN_NO_ASK.
+MAX_YES_LAST_FOR_EDGE = 1.0 - MIN_NO_ASK - MIN_EDGE  # 0.18
+# Sub-1% YES tails (politics/longshots): NO last ≈ 99¢+ with no 2¢ edge on books.
+MIN_YES_LAST = 0.01
 # Hard ceiling; live cap is min(this, nav_max_position_pct(NAV)).
 MAX_POSITION_PCT = 0.05
 USE_KELLY = True
@@ -114,6 +123,35 @@ def estimate_true_no_prob(yes_last: float, hours_to_expiry: float = 0.0) -> floa
     """
     del hours_to_expiry
     return max(0.0, min(1.0, 1.0 - yes_last))
+
+
+def gamma_no_last(market: Dict, yes_last: float) -> float:
+    """NO side last price from Gamma ``_outcome_prices``."""
+    prices = market.get("_outcome_prices") or (yes_last, 1.0 - yes_last)
+    if len(prices) >= 2:
+        try:
+            return float(prices[1])
+        except (TypeError, ValueError):
+            pass
+    return max(0.0, 1.0 - yes_last)
+
+
+def is_weather_market(title: str) -> bool:
+    """Title matches Polymarket daily high-temperature markets."""
+    t = (title or "").lower()
+    return "temperature" in t or "highest temperature" in t
+
+
+def is_focus_market(title: str, hours_to_expiry: float) -> bool:
+    """Small-account focus: weather (proven edge) or resolving within 48h."""
+    if is_weather_market(title):
+        return True
+    return hours_to_expiry <= FOCUS_MAX_HOURS
+
+
+def weather_market_priority(title: str) -> int:
+    """Boost sort rank for weather markets (historically best SC fill rate)."""
+    return 1 if is_weather_market(title) else 0
 
 
 def nav_cents(bal: Dict) -> Tuple[int, int, int]:
@@ -289,10 +327,17 @@ class SafeCompounder:
         self._skip_tag_ids: Optional[set] = None
         self._entries = entry_log or DailyEntryLog()
 
-    async def run(self, dry_run: Optional[bool] = None) -> Dict:
+    async def run(
+        self,
+        dry_run: Optional[bool] = None,
+        markets: Optional[List[Dict]] = None,
+    ) -> Dict:
         """
         Full scan: fetch → filter → orderbook check → place maker orders.
         Returns stats dict.
+
+        Pass ``markets`` from a shared Conservative-cycle fetch to avoid a
+        second Gamma round-trip for CompletenessArb in the same cycle.
         """
         if dry_run is not None:
             self.dry_run = dry_run
@@ -304,8 +349,9 @@ class SafeCompounder:
         logger.info(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         logger.info(
             "Rules: NO only | real ask ≥ $%.2f | last-vs-ask edge ≥ $%.2f | "
-            "depth %.0f%% of top-2 asks | ≤%d entries/day | no daily PnL target | FOK take ask",
-            self.min_no_ask, self.min_edge, DEPTH_TAKE_PCT * 100, MAX_ENTRIES_PER_DAY,
+            "focus weather+≤%.0fh | depth %.0f%% of top-2 asks | ≤%d entries/day | FOK take ask",
+            self.min_no_ask, self.min_edge, FOCUS_MAX_HOURS, DEPTH_TAKE_PCT * 100,
+            MAX_ENTRIES_PER_DAY,
         )
         logger.info("=" * 70)
 
@@ -324,14 +370,25 @@ class SafeCompounder:
         inv_stats = await self.manage_inventory()
         cancelled = await self._cancel_yes_orders()
 
-        # Step 1: Fetch all markets
-        print("\n📡 Step 1: Fetching all active markets...", flush=True)
-        markets = await self._fetch_all_markets()
-        print(f"  Fetched {len(markets)} markets", flush=True)
+        # Step 1: Fetch all markets (or reuse a shared Conservative-cycle list)
+        if markets is None:
+            print("\n📡 Step 1: Fetching all active markets...", flush=True)
+            markets = await self._fetch_all_markets()
+            print(f"  Fetched {len(markets)} markets", flush=True)
+        else:
+            print(f"\n📡 Step 1: Using {len(markets)} pre-fetched markets", flush=True)
 
         # Step 2: Filter NO candidates
-        print("\n🔍 Step 2: Finding NO-side candidates (YES ≤ $0.20)...", flush=True)
-        candidates = self._find_no_candidates(markets)
+        print(
+            f"\n🔍 Step 2: Finding NO-side candidates "
+            f"(YES ≤ ${MAX_YES_LAST_FOR_EDGE:.2f} | focus: weather or ≤{FOCUS_MAX_HOURS:.0f}h)...",
+            flush=True,
+        )
+        candidates, prefilter = self._find_no_candidates(markets)
+        if prefilter:
+            pf_txt = " ".join(f"{k}={v}" for k, v in sorted(prefilter.items()) if v)
+            print(f"  Prefilter (no orderbook): {pf_txt}", flush=True)
+            logger.info("Candidate prefilter: %s", pf_txt)
 
         # Step 3: Orderbook + edge check
         print(f"\n📊 Step 3: Checking orderbooks for edge ≥ ${self.min_edge:.2f}...", flush=True)
@@ -391,6 +448,24 @@ class SafeCompounder:
         print(f"  Inventory exits:      {inv_stats.get('exited', 0)}", flush=True)
         print(f"  Redeemed:             {inv_stats.get('redeemed', 0)}", flush=True)
         print(f"  Redeem needed:        {inv_stats.get('redeem_needed', 0)}", flush=True)
+        redeem_needed = int(inv_stats.get("redeem_needed", 0) or 0)
+        if redeem_needed > 0:
+            from src.clients.relayer_redeem import relayer_configured
+
+            hint = (
+                "configure POLYMARKET_RELAYER_API_KEY"
+                if not relayer_configured()
+                else "Relayer redeem failed — check logs / Polymarket UI"
+            )
+            print(
+                f"  ⚠️  REDEEM NEEDED ({redeem_needed}) — proxy wallet: {hint}",
+                flush=True,
+            )
+            logger.warning(
+                "REDEEM_NEEDED count=%s — %s",
+                redeem_needed,
+                hint,
+            )
         print(f"  YES orders cancelled: {cancelled}", flush=True)
         print(f"  Cash:                 ${cash_end/100:.2f}", flush=True)
         print(f"  MTM:                  ${mtm_end/100:.2f}", flush=True)
@@ -399,6 +474,7 @@ class SafeCompounder:
         print(f"{'='*70}\n", flush=True)
 
         stats["rejects"] = dict(rejects)
+        stats["prefilter"] = dict(prefilter)
         stats["markets_scanned"] = len(markets)
         stats["candidates"] = len(candidates)
         stats["opportunities"] = len(opportunities)
@@ -496,15 +572,19 @@ class SafeCompounder:
             self.client.flush_token_cache()
         return filtered
 
-    def _find_no_candidates(self, markets: List[Dict]) -> List[Dict]:
+    def _find_no_candidates(self, markets: List[Dict]) -> Tuple[List[Dict], Counter]:
         """Filter markets to NO-side candidates.
 
         Polymarket markets carry their condition_id in `_condition_id` (or
         `conditionId` raw). Volume comes from `_volume_num`. End-time is
         already an epoch second in `_end_ts`. YES last price is the first
         element of `_outcome_prices` (always [yes, no] for binary markets).
+
+        Returns (candidates, prefilter_rejects) where prefilter skips markets
+        before any orderbook HTTP call.
         """
         candidates = []
+        prefilter: Counter = Counter()
         now_ts = datetime.now(timezone.utc).timestamp()
 
         for m in markets:
@@ -519,29 +599,47 @@ class SafeCompounder:
             if any(phrase in title_lower for phrase in SKIP_TITLE_PHRASES):
                 continue
 
+            title = m.get("question") or ""
             volume = float(
                 m.get("_volume_num") or m.get("volumeNum") or m.get("volume") or 0
             )
-            if int(volume) < MIN_VOLUME:
-                continue
 
             outcome_prices = m.get("_outcome_prices") or (0.0, 0.0)
             yes_last = float(outcome_prices[0]) if outcome_prices else 0.0
-            if yes_last > 0.20:  # Only consider markets with YES ≤ $0.20
+            if yes_last > MAX_YES_LAST_FOR_EDGE:
+                prefilter["yes_high"] += 1
+                continue
+            if yes_last < MIN_YES_LAST:
+                prefilter["lottery_tail"] += 1
                 continue
 
             end_ts = m.get("_end_ts") or 0
             hours_to_expiry = max(0.0, (end_ts - now_ts) / 3600) if end_ts else 720.0
             if hours_to_expiry <= MIN_HOURS_TO_ENTRY:
+                prefilter["expiring"] += 1
+                continue
+
+            if not is_focus_market(title, hours_to_expiry):
+                prefilter["off_focus"] += 1
+                continue
+
+            min_vol = MIN_VOLUME_WEATHER if is_weather_market(title) else MIN_VOLUME
+            if int(volume) < min_vol:
+                prefilter["low_volume"] += 1
                 continue
 
             true_no_prob = estimate_true_no_prob(yes_last, hours_to_expiry)
+            no_last = gamma_no_last(m, yes_last)
+            max_affordable_ask = true_no_prob - MIN_EDGE
+            if no_last >= max_affordable_ask:
+                prefilter["gamma_no_high"] += 1
+                continue
 
             candidates.append({
                 **m,
                 # Stable ticker/title aliases for downstream code expecting them
                 "ticker": cond,
-                "title": m.get("question", ""),
+                "title": title,
                 "volume": volume,
                 "volume_fp": volume,
                 "_true_no_prob": true_no_prob,
@@ -549,22 +647,31 @@ class SafeCompounder:
                 "_days_to_expiry": round(hours_to_expiry / 24, 1),
             })
 
-        logger.info("Found %d NO-side candidates (YES last <= $0.20)", len(candidates))
-        
-        # Sort by estimated edge potential: lowest YES price + highest volume + soonest expiry
-        # Then cap to top 500 to keep orderbook checks under ~1 minute
-        MAX_ORDERBOOK_CHECKS = 200
+        logger.info(
+            "Found %d focus-pool NO candidates (weather or ≤%.0fh, YES last <= $%.2f)",
+            len(candidates), FOCUS_MAX_HOURS, MAX_YES_LAST_FOR_EDGE,
+        )
+
+        # Sort: weather first, then edge headroom, volume, expiry.
         if len(candidates) > MAX_ORDERBOOK_CHECKS:
             candidates.sort(key=lambda c: (
-                -c["_true_no_prob"],  # Highest estimated NO probability first
-                -float(c.get("volume_fp", 0) or c.get("volume", 0) or 0),  # Highest volume
-                c["_hours_to_expiry"],  # Soonest expiry
+                -weather_market_priority(c.get("title") or ""),
+                -c["_true_no_prob"],
+                -float(c.get("volume_fp", 0) or c.get("volume", 0) or 0),
+                c["_hours_to_expiry"],
             ))
             logger.info("Capping to top %d candidates (from %d) for orderbook checks",
                         MAX_ORDERBOOK_CHECKS, len(candidates))
             candidates = candidates[:MAX_ORDERBOOK_CHECKS]
-        
-        return candidates
+        elif candidates:
+            candidates.sort(key=lambda c: (
+                -weather_market_priority(c.get("title") or ""),
+                -c["_true_no_prob"],
+                -float(c.get("volume_fp", 0) or c.get("volume", 0) or 0),
+                c["_hours_to_expiry"],
+            ))
+
+        return candidates, prefilter
 
     async def _check_orderbook_and_price(
         self, candidates: List[Dict]

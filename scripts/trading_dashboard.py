@@ -36,7 +36,10 @@ load_dotenv(PROJECT_ROOT / ".env", override=True)
 from src.utils.database import DatabaseManager
 from src.clients import build_polymarket_clients
 from src.strategies.capital_policy import DailyEntryLog, MAX_ENTRIES_PER_DAY, trading_day
-from src.strategies.scan_stats import ScanStatsLog, DEFAULT_STATS_PATH
+from src.strategies.orphan_unwind import OrphanRegistry
+from src.clients.relayer_redeem import relayer_configured
+from src.strategies.btc15m_window_pnl import Btc15mWindowPnL, LEDGER_PATH as BTC15M_PNL_PATH
+from src.utils.ops_metrics import count_since
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _DEFAULT_LOG_PATH = PROJECT_ROOT / "logs" / "latest.log"
@@ -1210,10 +1213,151 @@ def _load_scan_dashboard_data(stats_path: str) -> dict:
         "summary": summary,
         "latest": latest,
         "series": series,
+        "first_recorded_day": log.first_recorded_day(),
         "entries_used": MAX_ENTRIES_PER_DAY - entries.remaining(),
         "entries_remaining": entries.remaining(),
         "stats_path": stats_path,
     }
+
+
+def render_ops_status_panel(project_root: Path) -> None:
+    """PM2 / 429 / NAV / redeem / orphan ops alerts."""
+    alerts_path = project_root / "data" / "ops_alerts.json"
+    payload: dict = {}
+    if alerts_path.exists():
+        try:
+            payload = json.loads(alerts_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+
+    alerts = payload.get("alerts") or []
+    crit = [a for a in alerts if a.get("severity") == "critical"]
+    warn = [a for a in alerts if a.get("severity") == "warning"]
+
+    st.subheader("🚨 运维告警")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("Critical", len(crit))
+    with c2:
+        st.metric("Warning", len(warn))
+    with c3:
+        st.metric("429（1h）", count_since(1.0, kind="rate_limit"))
+    with c4:
+        nav = payload.get("latest_nav_cents")
+        st.metric(
+            "最新 NAV",
+            f"${float(nav or 0)/100:.2f}" if nav else "—",
+        )
+
+    redeem_needed = int(payload.get("latest_redeem_needed") or 0)
+    orphan_n = int(payload.get("orphan_count") or len(OrphanRegistry().list()))
+    if redeem_needed > 0:
+        if relayer_configured():
+            st.warning(
+                f"**Redeem needed ({redeem_needed})** — Relayer 已配置但上轮失败；"
+                f"可运行 `python scripts/redeem_all.py` 或查日志。"
+            )
+        else:
+            st.error(
+                f"**Redeem needed ({redeem_needed})** — 请配置 Relayer 或 "
+                f"[Polymarket](https://polymarket.com/portfolio) 手动 redeem。"
+            )
+    if orphan_n > 0:
+        st.error(f"**Orphan 单腿 {orphan_n} 笔** — 等待自动 unwind / 强平。")
+
+    if alerts:
+        with st.expander("告警明细", expanded=bool(crit)):
+            for a in alerts:
+                sev = a.get("severity", "?")
+                icon = "🔴" if sev == "critical" else "🟡"
+                st.markdown(f"{icon} **{a.get('code')}**: {a.get('message')}")
+    else:
+        st.success("无活跃运维告警（`scripts/ops_alerts.py` 每 2 分钟检查）")
+
+    st.caption(
+        f"上次检查 {_format_scan_ts(payload.get('ts'))} · "
+        f"Discord 级别 **{os.getenv('POLYMARKET_DISCORD_ALERT_LEVEL', 'critical')}** · "
+        f"数据 `{alerts_path.relative_to(project_root)}`"
+    )
+    exp = payload.get("min_edge_experiment") or {}
+    if exp:
+        st.caption(
+            f"P2.3 MIN_EDGE 实验：**{exp.get('status', '—')}** · "
+            f"near-miss={exp.get('near_miss_count', 0)} · "
+            f"生产门槛仍 **$0.02**"
+        )
+    st.markdown("---")
+
+
+@st.cache_data(ttl=30)
+def _load_btc15m_dashboard_data(stats_path: str, pnl_path: str) -> dict:
+    stats: dict = {"cycles": []}
+    sp = Path(stats_path)
+    if sp.exists():
+        try:
+            raw = json.loads(sp.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                stats = raw
+        except (OSError, json.JSONDecodeError):
+            pass
+    pnl = Btc15mWindowPnL(Path(pnl_path))
+    today = trading_day()
+    latest = (stats.get("cycles") or [])[-1] if stats.get("cycles") else {}
+    return {
+        "latest": latest,
+        "pnl_summary": pnl.summary_for_day(today),
+        "recent_windows": pnl.recent_windows(10),
+    }
+
+
+def render_btc15m_panel(project_root: Path) -> None:
+    """Crypto 15m sleeve scan + per-window PnL."""
+    stats_path = project_root / "data" / "scan_stats_btc15m.json"
+    data = _load_btc15m_dashboard_data(str(stats_path), str(BTC15M_PNL_PATH))
+    latest = data["latest"] or {}
+    pnl = data["pnl_summary"]
+
+    st.subheader("⏱️ BTC/ETH 15m Completeness")
+    st.caption(
+        f"模式 **live** · 最近扫描 {_format_scan_ts(latest.get('ts'))} · "
+        f"orphan pending **{latest.get('orphan_pending', 0)}**"
+    )
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        st.metric("窗口扫描", latest.get("scanned", "—"))
+    with c2:
+        st.metric("成交对", latest.get("filled_pairs", 0))
+    with c3:
+        st.metric("unwound", latest.get("unwound", 0))
+    with c4:
+        exp = int(pnl.get("expected_profit_cents") or 0)
+        st.metric("今日预期", f"${exp/100:.2f}")
+    with c5:
+        real = int(pnl.get("realized_pnl_cents") or 0)
+        st.metric("今日已实现", f"${real/100:.2f}")
+
+    if data["recent_windows"]:
+        with st.expander("区间 PnL（最近窗口）", expanded=False):
+            rows = []
+            for w in data["recent_windows"]:
+                rows.append(
+                    {
+                        "资产": (w.get("asset") or "").upper(),
+                        "slug": w.get("slug"),
+                        "状态": w.get("status"),
+                        "成本 ($)": (int(w.get("cost_cents") or 0)) / 100,
+                        "预期 ($)": (int(w.get("expected_profit_cents") or 0)) / 100,
+                        "已实现 ($)": (
+                            (int(w.get("settled_pnl_cents") or 0)) / 100
+                            if w.get("settled_pnl_cents") is not None
+                            else None
+                        ),
+                    }
+                )
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+    st.markdown("---")
 
 
 def render_conservative_scan_panel(project_root: Path) -> None:
@@ -1226,6 +1370,18 @@ def render_conservative_scan_panel(project_root: Path) -> None:
     arb = summary["completeness_arb"]
     sc_latest = latest.get("safe_compounder") or {}
     arb_latest = latest.get("completeness_arb") or {}
+    redeem_needed = int(sc.get("latest_redeem_needed") or sc_latest.get("redeem_needed") or 0)
+    if redeem_needed > 0:
+        if relayer_configured():
+            st.warning(
+                f"⚠️ **Redeem needed: {redeem_needed}** — Relayer 已配置；"
+                f"运行 `scripts/redeem_all.py` 或等下轮 inventory 重试"
+            )
+        else:
+            st.warning(
+                f"⚠️ **Redeem needed: {redeem_needed}** — 配置 "
+                f"`POLYMARKET_RELAYER_API_KEY` 或 Polymarket UI 手动 redeem"
+            )
 
     st.subheader("🔍 Conservative 扫描观察")
     st.caption(
@@ -1286,10 +1442,14 @@ def render_conservative_scan_panel(project_root: Path) -> None:
                 f"过 edge **{sc_latest.get('opportunities', '—')}**\n"
                 f"- 下单 **{sc_latest.get('placed', 0)}** · "
                 f"成交 **{sc_latest.get('filled', 0)}** · "
-                f"赎回 **{sc_latest.get('redeemed', 0)}**\n"
+                f"赎回 **{sc_latest.get('redeemed', 0)}** · "
+                f"待 redeem **{sc_latest.get('redeem_needed', 0)}**\n"
                 f"- 跳过：已有仓 {sc_latest.get('skipped_existing', 0)} · "
                 f"聚类 {sc_latest.get('skipped_cluster', 0)} · "
                 f"日限 {sc_latest.get('skipped_daily_cap', 0)}\n"
+                f"- 预过滤（未查盘口）："
+                f" Gamma NO 偏贵 {((sc_latest.get('prefilter') or {}).get('gamma_no_high', 0))} · "
+                f"彩票尾 {((sc_latest.get('prefilter') or {}).get('lottery_tail', 0))}\n"
                 f"- 耗时 {_format_elapsed_s(sc_latest.get('elapsed_s'))}s · "
                 f"NAV ${float(sc_latest.get('nav_cents', 0) or 0) / 100:.2f}"
             )
@@ -1306,6 +1466,7 @@ def render_conservative_scan_panel(project_root: Path) -> None:
                 f"- 尝试 **{arb_latest.get('attempted', 0)}** · "
                 f"成交 **{arb_latest.get('filled_pairs', 0)}** · "
                 f"回滚 {arb_latest.get('unwound', 0)}\n"
+                f"- 预过滤 last-sum≥0.98：**{arb_latest.get('prefilter_last_sum', 0)}**\n"
                 f"- 耗时 {_format_elapsed_s(arb_latest.get('elapsed_s'))}s"
             )
             rej_arb = _reject_rows(arb_latest.get("rejects") or {})
@@ -1335,7 +1496,14 @@ def render_conservative_scan_panel(project_root: Path) -> None:
             height=280,
             margin=dict(l=10, r=10, t=30, b=10),
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
-            title="近 7 日：成交 vs 有机会次数",
+            title=(
+                "近 7 日：成交 vs 有机会次数"
+                + (
+                    f"（scan_stats 自 {data['first_recorded_day']} 起）"
+                    if data.get("first_recorded_day")
+                    else ""
+                )
+            ),
         )
         fig.update_yaxes(title_text="成交", secondary_y=False)
         fig.update_yaxes(title_text="有机会（累计）", secondary_y=True)
@@ -1349,12 +1517,15 @@ def render_conservative_scan_panel(project_root: Path) -> None:
             te_df.columns = ["标题", "edge ($)", "NO ask ($)", "分类"]
             st.dataframe(te_df, hide_index=True, width="stretch")
 
-    # Near-misses (latest cycle)
+    # Near-misses (latest cycle) — always show count (P2.4)
     near_misses = sc.get("near_misses") or []
     near_miss_count = sc.get("near_miss_count", 0)
+    st.caption(
+        f"🎯 Near-miss（0 < edge < 2¢）：**{near_miss_count}** 个（最近一轮）"
+    )
     if near_misses:
         with st.expander(
-            f"🎯 Near-miss（edge 1~2¢ 差一点就能交易）共 {near_miss_count} 个，展示 Top {len(near_misses)}",
+            f"展示 Top {len(near_misses)} near-miss",
             expanded=False,
         ):
             nm_df = pd.DataFrame(near_misses)
@@ -1404,6 +1575,8 @@ def show_overview(performance_data, positions, system_health_data, open_orders=N
     st.header("📈 System Overview")
     open_orders = open_orders or []
 
+    render_ops_status_panel(PROJECT_ROOT)
+    render_btc15m_panel(PROJECT_ROOT)
     render_conservative_scan_panel(PROJECT_ROOT)
 
     token = system_health_data.get("collateral_token", "pUSD")

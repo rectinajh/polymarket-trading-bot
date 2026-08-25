@@ -1,4 +1,4 @@
-"""Unit tests for BTC 15m slug discovery (no network)."""
+"""Unit tests for crypto 15m slug discovery (no network)."""
 
 from __future__ import annotations
 
@@ -6,6 +6,9 @@ import unittest
 
 from src.strategies.btc_15m_completeness.discover import (
     aligned_window_start,
+    asset_from_slug,
+    multi_asset_slugs,
+    normalize_assets,
     seconds_to_window_end,
     window_slugs,
 )
@@ -13,8 +16,7 @@ from src.strategies.btc_15m_completeness.discover import (
 
 class TestBtc15mDiscover(unittest.TestCase):
     def test_aligned_window(self) -> None:
-        # 2026-08-21 09:07:30 UTC → floor to 09:00:00
-        ts = 1787293650  # arbitrary; just check modulo
+        ts = 1787293650
         start = aligned_window_start(ts)
         self.assertEqual(start % 900, 0)
         self.assertLessEqual(start, int(ts))
@@ -27,6 +29,19 @@ class TestBtc15mDiscover(unittest.TestCase):
         for s in slugs:
             self.assertTrue(s.startswith("btc-updown-15m-"))
             self.assertTrue(s.rsplit("-", 1)[-1].isdigit())
+
+    def test_eth_slugs(self) -> None:
+        slugs = window_slugs(asset="eth", now_ts=1_700_000_000, behind=0, ahead=0)
+        self.assertEqual(len(slugs), 1)
+        self.assertTrue(slugs[0].startswith("eth-updown-15m-"))
+
+    def test_multi_asset_default_btc_eth(self) -> None:
+        self.assertEqual(normalize_assets(), ["btc", "eth"])
+        slugs = multi_asset_slugs(now_ts=1_700_000_000, behind=0, ahead=0)
+        self.assertEqual(len(slugs), 2)
+        self.assertTrue(slugs[0].startswith("btc-updown-15m-"))
+        self.assertTrue(slugs[1].startswith("eth-updown-15m-"))
+        self.assertEqual(asset_from_slug(slugs[1]), "eth")
 
     def test_seconds_to_end(self) -> None:
         start = aligned_window_start(1_700_000_100)
