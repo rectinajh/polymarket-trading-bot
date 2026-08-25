@@ -13,6 +13,8 @@ data/scan_stats_btc15m.json
 data/daily_entries_btc15m.json
 data/scan_stats_sports.json
 data/daily_entries_sports.json
+data/sports_pnl.json
+data/sports_discord_state.json
 data/ops_alerts.json
 data/ops_discord_state.json
 data/ops_metrics.json

@@ -42,11 +42,14 @@ from src.strategies.btc15m_window_pnl import Btc15mWindowPnL, LEDGER_PATH as BTC
 from src.strategies.scan_stats import ScanStatsLog, DEFAULT_STATS_PATH
 from src.strategies.sports.config import (
     DEFAULT_LEDGER as SPORTS_LEDGER_PATH,
+    DEFAULT_PNL_PATH as SPORTS_PNL_PATH,
     DEFAULT_SCAN_LOG as SPORTS_STATS_PATH,
     MAX_ENTRIES_PER_DAY as SPORTS_MAX_ENTRIES_PER_DAY,
     RN1_CONFIRM_MODE,
     SLEEVE_CAP_PCT,
+    SPORTS_EXPERIMENT_DAYS,
 )
+from src.strategies.sports.sports_pnl import SportsPnL
 from src.utils.ops_metrics import count_since
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -1214,6 +1217,8 @@ def _reject_rows(rejects: dict, limit: int = 8) -> pd.DataFrame:
         "book_error": "盘口失败",
         "size_zero": "仓位为 0",
         "order_error": "下单失败",
+        "guard_halt": "停损/实验暂停",
+        "open_order": "已有挂单",
     }
     return pd.DataFrame(
         [{"原因": labels.get(k, k), "次数": int(v)} for k, v in items if int(v) > 0]
@@ -1325,7 +1330,7 @@ def _cycle_trading_day(ts: Optional[str]) -> Optional[str]:
 
 
 @st.cache_data(ttl=30)
-def _load_sports_dashboard_data(stats_path: str, ledger_path: str) -> dict:
+def _load_sports_dashboard_data(stats_path: str, ledger_path: str, pnl_path: str) -> dict:
     stats: dict = {"cycles": []}
     sp = Path(stats_path)
     if sp.exists():
@@ -1356,6 +1361,10 @@ def _load_sports_dashboard_data(stats_path: str, ledger_path: str) -> dict:
         if len(recent_signals) >= 15:
             break
 
+    pnl = SportsPnL(Path(pnl_path))
+    today_pnl = pnl.summary_for_day(today)
+    exp = pnl.experiment_summary()
+
     return {
         "latest": latest,
         "today_cycles": len(today_cycles),
@@ -1366,6 +1375,9 @@ def _load_sports_dashboard_data(stats_path: str, ledger_path: str) -> dict:
         "entries_used": SPORTS_MAX_ENTRIES_PER_DAY - entries.remaining(),
         "entries_remaining": entries.remaining(),
         "recent_signals": recent_signals[:15],
+        "pnl_today": today_pnl,
+        "experiment": exp,
+        "recent_pnl": pnl.recent_entries(12),
     }
 
 
@@ -1373,9 +1385,13 @@ def render_sports_rn1_panel(project_root: Path) -> None:
     """RN1 sports sleeve: Pinnacle + smart-money confirm + scan stats."""
     stats_path = project_root / SPORTS_STATS_PATH
     ledger_path = project_root / SPORTS_LEDGER_PATH
-    data = _load_sports_dashboard_data(str(stats_path), str(ledger_path))
+    data = _load_sports_dashboard_data(
+        str(stats_path), str(ledger_path), str(project_root / SPORTS_PNL_PATH),
+    )
     latest = data["latest"] or {}
     is_live = bool(latest.get("live"))
+    pnl_today = data.get("pnl_today") or {}
+    exp = data.get("experiment") or {}
 
     st.subheader("⚽ RN1 体育 Maker")
     mode_label = "**live**" if is_live else "dry-run"
@@ -1397,6 +1413,9 @@ def render_sports_rn1_panel(project_root: Path) -> None:
         st.markdown("---")
         return
 
+    if latest.get("guard_halted"):
+        st.error(f"⛔ 停损/实验暂停：{latest.get('guard_reason', 'guard')}")
+
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     with c1:
         st.metric("扫描市场", latest.get("scanned", "—"))
@@ -1415,6 +1434,17 @@ def render_sports_rn1_panel(project_root: Path) -> None:
             f"{data['entries_used']}/{SPORTS_MAX_ENTRIES_PER_DAY}",
             delta=f"剩 {data['entries_remaining']}",
         )
+
+    p1, p2, p3, p4 = st.columns(4)
+    with p1:
+        st.metric("今日已实现 PnL", f"${int(pnl_today.get('realized_pnl_cents', 0))/100:+.2f}")
+    with p2:
+        st.metric("累计已实现", f"${int(exp.get('realized_pnl_cents', 0))/100:+.2f}")
+    with p3:
+        st.metric("持仓中", int(exp.get("open") or 0))
+    with p4:
+        start = exp.get("experiment_start") or "—"
+        st.metric("实验进度", f"{start} · {SPORTS_EXPERIMENT_DAYS}d")
 
     q = latest.get("odds_quota") or {}
     if q.get("remaining"):
@@ -1438,6 +1468,27 @@ def render_sports_rn1_panel(project_root: Path) -> None:
         if not rej.empty:
             st.markdown("**拒绝原因（本轮）**")
             st.dataframe(rej, hide_index=True, width="stretch")
+
+    recent_pnl = data.get("recent_pnl") or []
+    if recent_pnl:
+        with st.expander("PnL 台账（最近）", expanded=False):
+            rows = []
+            for e in recent_pnl:
+                rows.append(
+                    {
+                        "球队": e.get("team"),
+                        "状态": e.get("status"),
+                        "成本 ($)": int(e.get("cost_cents") or 0) / 100,
+                        "PnL ($)": (
+                            int(e.get("settled_pnl_cents") or 0) / 100
+                            if e.get("settled_pnl_cents") is not None
+                            else None
+                        ),
+                        "edge": e.get("edge"),
+                        "日期": e.get("match_date"),
+                    }
+                )
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
     if data["recent_signals"]:
         with st.expander("近期信号（含 RN1 确认）", expanded=True):

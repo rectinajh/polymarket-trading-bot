@@ -9,6 +9,18 @@ PnL 数字仍记在 [NET_PNL.md](NET_PNL.md)。**阶段计划与决策门**见 [
 
 ---
 
+## 2026-08-26 — 体育 PnL / 停损 / Discord 完善
+
+**目的：** 补齐体育 L1 运维：结算台账、90 天实验停损、Discord、Dashboard PnL。
+
+- `sports_pnl.json`：开仓、mark、won/lost 结算
+- `sports_guard.py`：日亏 5% NAV、实验回撤 30%、90 天到期
+- `sports_alerts.py`：Discord 推送挂单/结算/暂停（`POLYMARKET_SPORTS_DISCORD`）
+- 策略：停损拦截、避免重复 GTC、live 成交写台账
+- Dashboard：今日/累计 PnL、实验进度、PnL 台账表
+
+---
+
 ## 2026-08-26 — 体育 live + Dashboard 面板
 
 **目的：** P4 从 dry-run 切 live；Overview 可视体育扫描与 RN1 确认。

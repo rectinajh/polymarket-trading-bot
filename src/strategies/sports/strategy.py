@@ -27,11 +27,19 @@ from src.strategies.sports.config import (
     RN1_CONFIRM_MODE,
     RN1_PROXY_WALLET,
     SLEEVE_CAP_PCT,
+    SPORTS_EXPERIMENT_DAYS,
 )
 from src.strategies.sports.discover import fetch_match_winner_markets, in_favorite_band
 from src.strategies.sports.edge import evaluate_maker_opportunity
 from src.strategies.sports.match import match_market_to_reference
 from src.strategies.sports.rn1_tracker import RN1WalletTracker, rn1_confirms
+from src.strategies.sports.sports_alerts import (
+    notify_sports_halt,
+    notify_sports_order,
+    notify_sports_settlement,
+)
+from src.strategies.sports.sports_guard import check_trading_allowed
+from src.strategies.sports.sports_pnl import SportsPnL
 from src.strategies.safe_compounder import nav_cents
 
 logger = logging.getLogger(__name__)
@@ -49,6 +57,7 @@ class Rn1SportsMaker:
         dry_run: bool = True,
         entry_log: Optional[DailyEntryLog] = None,
         scan_log_path: Path = DEFAULT_SCAN_LOG,
+        pnl: Optional[SportsPnL] = None,
     ):
         self.client = client
         self.gamma = gamma or GammaClient()
@@ -63,6 +72,8 @@ class Rn1SportsMaker:
             limit=MAX_ENTRIES_PER_DAY,
         )
         self.scan_log_path = Path(scan_log_path)
+        self._pnl = pnl or SportsPnL()
+        self._halt_notified = False
 
     async def run(self, dry_run: Optional[bool] = None) -> Dict[str, Any]:
         if dry_run is not None:
@@ -84,7 +95,11 @@ class Rn1SportsMaker:
             "skipped_kickoff": 0,
             "rn1_trades_cached": 0,
             "rn1_confirmed": 0,
+            "guard_halted": 0,
+            "settled": 0,
             "deployed_cents": 0,
+            "pnl_summary": {},
+            "guard_meta": {},
             "signals": [],
             "rejects": {},
             "odds_quota": {},
@@ -113,6 +128,56 @@ class Rn1SportsMaker:
         bal = await self.client.get_balance()
         cash, mtm, nav = nav_cents(bal)
         print(f"   NAV ${nav/100:.2f} | cash ${cash/100:.2f}", flush=True)
+
+        positions_resp = await self.client.get_positions()
+        pos_list = positions_resp.get("market_positions") or []
+        if not isinstance(pos_list, list):
+            pos_list = []
+
+        settled_now = self._pnl.update_from_positions(pos_list)
+        stats["settled"] = len(settled_now)
+        for entry in settled_now:
+            notify_sports_settlement(
+                team=str(entry.get("team") or ""),
+                status=str(entry.get("status") or ""),
+                pnl_cents=int(entry.get("settled_pnl_cents") or 0),
+                title=str(entry.get("title") or ""),
+            )
+
+        allowed, guard_reason, guard_meta = check_trading_allowed(
+            nav_cents=nav, pnl=self._pnl,
+        )
+        stats["guard_meta"] = guard_meta
+        stats["pnl_summary"] = self._pnl.experiment_summary()
+        if not allowed:
+            stats["guard_halted"] = 1
+            stats["guard_reason"] = guard_reason
+            print(f"   ⛔ Guard halt: {guard_reason}", flush=True)
+            if not self._halt_notified:
+                notify_sports_halt(guard_reason, guard_meta)
+                self._halt_notified = True
+        else:
+            self._halt_notified = False
+            exp = stats["pnl_summary"]
+            if exp.get("experiment_start"):
+                elapsed = guard_meta.get("days_elapsed", 0)
+                print(
+                    f"   Experiment day {elapsed}/{SPORTS_EXPERIMENT_DAYS} · "
+                    f"realized ${int(exp.get('realized_pnl_cents', 0))/100:+.2f}",
+                    flush=True,
+                )
+
+        open_orders: set = set()
+        if not self.dry_run and hasattr(self.client, "get_orders"):
+            try:
+                resp = await self.client.get_orders(status="live")
+                for o in resp.get("orders") or []:
+                    if str(o.get("side") or "").lower() == "yes":
+                        cond = str(o.get("condition_id") or o.get("ticker") or "")
+                        if cond:
+                            open_orders.add(cond.lower())
+            except Exception as exc:
+                logger.warning("Open orders fetch failed: %s", exc)
 
         if RN1_CONFIRM_MODE not in ("off", "none", "disabled", "0", "false"):
             try:
@@ -152,10 +217,6 @@ class Rn1SportsMaker:
         markets = await self._fetch_markets()
         stats["scanned"] = len(markets)
 
-        positions_resp = await self.client.get_positions()
-        pos_list = positions_resp.get("market_positions") or []
-        if not isinstance(pos_list, list):
-            pos_list = []
         pos_tickers = {
             str(p.get("condition_id") or p.get("conditionId") or p.get("ticker") or "")
             for p in pos_list
@@ -164,6 +225,9 @@ class Rn1SportsMaker:
 
         now = datetime.now(timezone.utc)
         for mkt in markets:
+            if not allowed:
+                rejects["guard_halt"] += 1
+                continue
             if not in_favorite_band(mkt.yes_price, lo=FAVORITE_MIN, hi=FAVORITE_MAX):
                 rejects["not_favorite"] += 1
                 continue
@@ -191,6 +255,10 @@ class Rn1SportsMaker:
 
             if mkt.condition_id in self._entries.tickers():
                 rejects["already_entered_today"] += 1
+                continue
+
+            if mkt.condition_id.lower() in open_orders:
+                rejects["open_order"] += 1
                 continue
 
             self._register_market(mkt)
@@ -279,7 +347,32 @@ class Rn1SportsMaker:
                 cash -= cost_cents
                 remaining -= 1
                 pos_tickers.add(mkt.condition_id)
+                open_orders.add(mkt.condition_id.lower())
                 self._entries.record(mkt.condition_id, mkt.question, kind="sports_rn1")
+                self._pnl.record_entry(
+                    condition_id=mkt.condition_id,
+                    title=mkt.question,
+                    team=mkt.team,
+                    match_date=mkt.match_date.isoformat(),
+                    shares=shares,
+                    price=opp.maker_price,
+                    fair_prob=opp.fair_prob,
+                    edge=opp.edge,
+                    sport=ref.event.sport_key,
+                    match=f"{ref.event.home_team} vs {ref.event.away_team}",
+                    live=True,
+                )
+                notify_sports_order(
+                    team=mkt.team,
+                    match=f"{ref.event.home_team} vs {ref.event.away_team}",
+                    shares=shares,
+                    price=opp.maker_price,
+                    edge=opp.edge,
+                    fair_prob=opp.fair_prob,
+                    live=True,
+                    condition_id=mkt.condition_id,
+                    rn1_reason=confirm.reason,
+                )
             except Exception as exc:
                 stats["errors"] += 1
                 rejects["order_error"] += 1

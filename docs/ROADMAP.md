@@ -117,11 +117,14 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；P1 书面结论见 [P1_REVIEW.md](P1_REVIEW.m
 |---|---|
 | Odds API + Pinnacle 参考线 | ✅ `odds_api_client.py` |
 | RN1 聪明钱确认（Layer 2） | ✅ `rn1_tracker.py`，默认 `strict` |
+| 体育 PnL + 90d 停损 | ✅ `sports_pnl.py` + `sports_guard.py` |
+| Discord 体育推送 | ✅ `sports_alerts.py`（挂单/结算/暂停） |
+| 防重复挂单 | ✅ 检测 open YES orders |
 | 市场发现 + 队名匹配 | ✅ `src/strategies/sports/` |
 | CLI `--sports-rn1` + PM2 | ✅ **live** 300s |
 | Live 实盘 | ✅ PM2 `--live`（≤1% NAV，RN1 strict） |
 
-**仍缺：** WebSocket Maker、双边库存、体育结算 PnL、60 天对照实验。
+**仍缺：** WebSocket Maker、双边库存（L2）；其余 L1 台账/告警/停损已上线。
 
 ---
 

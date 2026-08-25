@@ -49,3 +49,10 @@ RN1_PROXY_WALLET = (
 RN1_CONFIRM_MODE = os.getenv("RN1_CONFIRM_MODE", "strict").lower().strip()
 RN1_LOOKBACK_HOURS = float(os.getenv("RN1_LOOKBACK_HOURS", "24"))
 RN1_PRICE_TOLERANCE_TICKS = int(os.getenv("RN1_PRICE_TOLERANCE_TICKS", "2"))
+
+# Experiment / stop-loss (90-day sports sleeve).
+SPORTS_EXPERIMENT_DAYS = int(os.getenv("SPORTS_EXPERIMENT_DAYS", "90"))
+SPORTS_MAX_DAILY_LOSS_PCT = float(os.getenv("SPORTS_MAX_DAILY_LOSS_PCT", "0.05"))
+SPORTS_MAX_DRAWDOWN_PCT = float(os.getenv("SPORTS_MAX_DRAWDOWN_PCT", "0.30"))
+
+DEFAULT_PNL_PATH = Path("data") / "sports_pnl.json"
