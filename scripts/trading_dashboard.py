@@ -41,12 +41,11 @@ from src.clients.relayer_redeem import relayer_configured
 from src.strategies.btc15m_window_pnl import Btc15mWindowPnL, LEDGER_PATH as BTC15M_PNL_PATH
 from src.strategies.scan_stats import ScanStatsLog, DEFAULT_STATS_PATH
 from src.strategies.sports.config import (
+    COPY_MAX_USDC,
     DEFAULT_LEDGER as SPORTS_LEDGER_PATH,
     DEFAULT_PNL_PATH as SPORTS_PNL_PATH,
     DEFAULT_SCAN_LOG as SPORTS_STATS_PATH,
     MAX_ENTRIES_PER_DAY as SPORTS_MAX_ENTRIES_PER_DAY,
-    RN1_CONFIRM_MODE,
-    SLEEVE_CAP_PCT,
     SPORTS_EXPERIMENT_DAYS,
 )
 from src.strategies.sports.sports_pnl import SportsPnL
@@ -1382,7 +1381,7 @@ def _load_sports_dashboard_data(stats_path: str, ledger_path: str, pnl_path: str
 
 
 def render_sports_rn1_panel(project_root: Path) -> None:
-    """RN1 sports sleeve: Pinnacle + smart-money confirm + scan stats."""
+    """RN1 sports copy sleeve: mirror RN1 BUY ≤$1 USDC."""
     stats_path = project_root / SPORTS_STATS_PATH
     ledger_path = project_root / SPORTS_LEDGER_PATH
     data = _load_sports_dashboard_data(
@@ -1393,16 +1392,17 @@ def render_sports_rn1_panel(project_root: Path) -> None:
     pnl_today = data.get("pnl_today") or {}
     exp = data.get("experiment") or {}
 
-    st.subheader("⚽ RN1 体育 Maker")
+    st.subheader("⚽ RN1 跟单")
     mode_label = "**live**" if is_live else "dry-run"
+    cap = float(latest.get("copy_max_usdc") or COPY_MAX_USDC)
     st.caption(
-        f"模式 {mode_label} · RN1 确认 **{latest.get('rn1_confirm_mode', RN1_CONFIRM_MODE)}** · "
-        f"袖套 ≤{SLEEVE_CAP_PCT*100:.0f}% NAV · 日限 {SPORTS_MAX_ENTRIES_PER_DAY} · "
+        f"模式 {mode_label} · 跟单 RN1 BUY · 单笔 ≤**${cap:.2f}** · "
+        f"日限 {SPORTS_MAX_ENTRIES_PER_DAY} · "
         f"最近扫描 {_format_scan_ts(latest.get('ts'))}"
     )
     if is_live:
         st.warning(
-            "体育袖套为 **live**（方向性风险）。门槛：Pinnacle edge + RN1 确认。"
+            "体育袖套为 **live 跟单**（方向性风险）。无 Odds API；只跟 RN1 新成交。"
         )
 
     if not latest:
@@ -1416,13 +1416,16 @@ def render_sports_rn1_panel(project_root: Path) -> None:
     if latest.get("guard_halted"):
         st.error(f"⛔ 停损/实验暂停：{latest.get('guard_reason', 'guard')}")
 
+    if latest.get("bootstrapped"):
+        st.info("本轮为 bootstrap：已把历史 RN1 成交标记为 seen，下一轮起才跟新单。")
+
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     with c1:
-        st.metric("扫描市场", latest.get("scanned", "—"))
+        st.metric("RN1 缓存笔数", latest.get("rn1_trades_cached", latest.get("scanned", "—")))
     with c2:
-        st.metric("Pinnacle 有机会", latest.get("opportunities", 0))
+        st.metric("新信号", latest.get("new_signals", 0))
     with c3:
-        st.metric("RN1 确认", latest.get("rn1_confirmed", 0))
+        st.metric("可跟机会", latest.get("opportunities", 0))
     with c4:
         st.metric("今日下单", data["today_placed"])
     with c5:
@@ -1446,28 +1449,25 @@ def render_sports_rn1_panel(project_root: Path) -> None:
         start = exp.get("experiment_start") or "—"
         st.metric("实验进度", f"{start} · {SPORTS_EXPERIMENT_DAYS}d")
 
-    q = latest.get("odds_quota") or {}
-    if q.get("remaining"):
-        st.caption(
-            f"Odds API 配额剩余 **{q.get('remaining')}** · "
-            f"Pinnacle 参考场 **{latest.get('reference_events', '—')}** · "
-            f"RN1 缓存 **{latest.get('rn1_trades_cached', '—')}** 笔/24h"
-        )
-
     with st.expander("最近一轮明细", expanded=False):
         st.markdown(
-            f"- 热门区间 **{latest.get('favorite_band', 0)}** · "
-            f"匹配参考 **{latest.get('matched_reference', 0)}** · "
+            f"- 新信号 **{latest.get('new_signals', 0)}** · "
+            f"机会 **{latest.get('opportunities', 0)}** · "
             f"尝试 **{latest.get('attempted', 0)}** · "
             f"placed **{latest.get('placed', 0)}** · "
             f"错误 **{latest.get('errors', 0)}**\n"
             f"- 耗时 {_format_elapsed_s(latest.get('elapsed_s'))}s · "
-            f"entries_remaining **{latest.get('entries_remaining', '—')}**"
+            f"entries_remaining **{latest.get('entries_remaining', '—')}** · "
+            f"mode `{latest.get('mode', '—')}`"
         )
         rej = _reject_rows(latest.get("rejects") or {}, limit=12)
         if not rej.empty:
             st.markdown("**拒绝原因（本轮）**")
             st.dataframe(rej, hide_index=True, width="stretch")
+        sigs = latest.get("signals") or []
+        if sigs:
+            st.markdown("**跟单信号**")
+            st.dataframe(pd.DataFrame(sigs), hide_index=True, width="stretch")
 
     recent_pnl = data.get("recent_pnl") or []
     if recent_pnl:

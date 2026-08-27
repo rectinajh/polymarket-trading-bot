@@ -62,16 +62,24 @@ class SportsPnL:
         sport: str = "",
         match: str = "",
         live: bool = True,
+        side: str = "yes",
     ) -> None:
         data = self._load()
         self._ensure_experiment_start(data)
         cost_cents = int(round(shares * price * 100))
         expected_cents = int(round(shares * edge * 100))
-        key = condition_id.lower()
-        entries = [e for e in data["entries"] if e.get("condition_id", "").lower() != key]
+        side_l = str(side or "yes").lower()
+        if side_l not in ("yes", "no"):
+            side_l = "yes"
+        key = f"{condition_id.lower()}:{side_l}"
+        entries = [
+            e for e in data["entries"]
+            if f"{str(e.get('condition_id') or '').lower()}:{str(e.get('side') or 'yes').lower()}" != key
+        ]
         entries.append(
             {
                 "condition_id": condition_id,
+                "side": side_l,
                 "title": (title or "")[:120],
                 "team": team,
                 "match_date": match_date,
@@ -90,6 +98,7 @@ class SportsPnL:
                 "redeemable": False,
                 "opened_ts": _now_cn().isoformat(),
                 "day": trading_day(),
+                "exit_reason": None,
             }
         )
         data["entries"] = entries[-300:]
@@ -97,20 +106,20 @@ class SportsPnL:
 
     def update_from_positions(self, positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Refresh marks and settle entries when positions close. Returns newly settled."""
-        by_cond: Dict[str, Dict[str, Any]] = {}
+        by_key: Dict[str, Dict[str, Any]] = {}
         for p in positions or []:
             if not isinstance(p, dict):
                 continue
             cond = str(p.get("condition_id") or p.get("conditionId") or p.get("ticker") or "")
             if not cond:
                 continue
-            side = str(p.get("side") or "").upper()
-            if side and side not in ("YES", "Y"):
+            side = str(p.get("side") or "").lower()
+            if side not in ("yes", "no"):
                 continue
             size = float(p.get("size") or 0)
             if size <= 0:
                 continue
-            by_cond[cond.lower()] = p
+            by_key[f"{cond.lower()}:{side}"] = p
 
         data = self._load()
         updated: List[Dict[str, Any]] = []
@@ -119,7 +128,9 @@ class SportsPnL:
             if entry.get("status") != "open":
                 continue
             cond = str(entry.get("condition_id") or "").lower()
-            pos = by_cond.get(cond)
+            side = str(entry.get("side") or "yes").lower()
+            # Legacy YES-only entries without side: treat as yes
+            pos = by_key.get(f"{cond}:{side}")
             if pos:
                 cur = float(pos.get("current_price") or pos.get("curPrice") or 0)
                 shares = float(pos.get("size") or entry.get("shares") or 0)
@@ -128,21 +139,74 @@ class SportsPnL:
                 dirty = True
                 continue
 
+            # Still open on chain? skip settle — may be temporary API gap
+            # Only auto-settle if redeemable was already true or mark near $1
             cost = int(entry.get("cost_cents") or 0)
             shares = int(entry.get("shares") or 0)
             if entry.get("redeemable") or int(entry.get("mark_cents") or 0) >= shares * 95:
                 payout = shares * 100
                 entry["settled_pnl_cents"] = payout - cost
                 entry["status"] = "won"
+                entry["exit_reason"] = entry.get("exit_reason") or "settled"
             else:
-                entry["settled_pnl_cents"] = -cost
-                entry["status"] = "lost"
+                # Do NOT mark lost just because position missing from snapshot
+                # (NO sides used to get false "lost"). Leave open.
+                continue
             entry["closed_ts"] = _now_cn().isoformat()
             updated.append(dict(entry))
+            dirty = True
 
         if dirty or updated:
             self._save(data)
         return updated
+
+    def mark_closed(
+        self,
+        condition_id: str,
+        side: str,
+        *,
+        exit_price: float,
+        shares: int,
+        reason: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Close an open ledger row after we sell. Returns closed entry or None."""
+        data = self._load()
+        side_l = str(side or "yes").lower()
+        cond = condition_id.lower()
+        for entry in data.get("entries") or []:
+            if entry.get("status") != "open":
+                continue
+            if str(entry.get("condition_id") or "").lower() != cond:
+                continue
+            if str(entry.get("side") or "yes").lower() != side_l:
+                continue
+            cost = int(entry.get("cost_cents") or 0)
+            sh = int(shares or entry.get("shares") or 0)
+            proceeds = int(round(exit_price * sh * 100))
+            entry["settled_pnl_cents"] = proceeds - cost
+            entry["status"] = "won" if proceeds >= cost else "lost"
+            entry["exit_reason"] = reason
+            entry["exit_price"] = round(exit_price, 4)
+            entry["closed_ts"] = _now_cn().isoformat()
+            entry["mark_cents"] = proceeds
+            self._save(data)
+            return dict(entry)
+        return None
+
+    def open_copy_keys(self) -> set:
+        """Set of ``condition_id:side`` for open rn1 soccer copies."""
+        out = set()
+        for e in self._load().get("entries") or []:
+            if e.get("status") != "open":
+                continue
+            sport = str(e.get("sport") or "")
+            if "rn1" not in sport and "soccer" not in sport:
+                continue
+            cond = str(e.get("condition_id") or "").lower()
+            side = str(e.get("side") or "yes").lower()
+            if cond and side in ("yes", "no"):
+                out.add(f"{cond}:{side}")
+        return out
 
     def summary_for_day(self, day: Optional[str] = None) -> Dict[str, Any]:
         day = day or trading_day()

@@ -87,12 +87,51 @@ def notify_sports_order(
         return False
 
     mode = "LIVE" if live else "DRY"
+    if edge and edge > 0:
+        mid = f"Pinn {fair_prob:.2f} · edge {edge:.2f}\n"
+    else:
+        mid = f"跟单价 ${price:.2f} · fair≈{fair_prob:.2f}\n"
     content = (
-        f"**[{SOURCE}]** ⚽ 体育 {mode} 挂单\n"
-        f"**{team}** YES x{shares} @ ${price:.2f}\n"
-        f"Pinn {fair_prob:.2f} · edge {edge:.2f}\n"
+        f"**[{SOURCE}]** ⚽ 体育 {mode} 跟单\n"
+        f"**{team}** x{shares} @ ${price:.2f}\n"
+        f"{mid}"
         f"{match}\n"
         f"RN1: {rn1_reason[:120] if rn1_reason else '—'}"
+    )
+    if send_discord_message(content[:1900]):
+        _mark_sent(key)
+        return True
+    return False
+
+
+def notify_sports_exit(
+    *,
+    title: str,
+    side: str,
+    shares: int,
+    entry_price: float,
+    exit_price: float,
+    reason: str,
+    live: bool,
+    condition_id: str = "",
+) -> bool:
+    if not _enabled():
+        return False
+    fp = hashlib.sha256(
+        f"exit:{condition_id}:{side}:{reason}:{shares}".encode()
+    ).hexdigest()[:12]
+    key = f"exit:{fp}"
+    if not _should_send(key):
+        return False
+
+    pnl = (exit_price - entry_price) * shares
+    mode = "LIVE" if live else "DRY"
+    content = (
+        f"**[{SOURCE}]** ⚽ 体育 {mode} 平仓\n"
+        f"**{side.upper()}** x{shares} @ ${exit_price:.2f} "
+        f"(入 ${entry_price:.2f})\n"
+        f"原因: {reason} · PnL ${pnl:+.2f}\n"
+        f"{(title or '')[:100]}"
     )
     if send_discord_message(content[:1900]):
         _mark_sent(key)

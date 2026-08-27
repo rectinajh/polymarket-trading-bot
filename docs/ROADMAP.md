@@ -22,7 +22,7 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；P1 书面结论见 [P1_REVIEW.md](P1_REVIEW.m
 | **P1** | **8/25–8/26** | 复盘 + 定价/选池诊断 | **✅ 已完成** → [P1_REVIEW.md](P1_REVIEW.md) |
 | **P2** | **8/26 起** | Conservative 小改（选 B） | **✅ 核心项已完成**；2.2/2.3 按 P1 跳过 |
 | **P3** | 8/21 起 | BTC+ETH 15m Completeness | **✅ live 60s**（P1 曾建议 dry-run；**8/26 用户改回 live**） |
-| **P4** | **8/26 起** | RN1 体育 Maker | **🟡 L1 live**；**L2 排队** → [P4_L2_NEXT.md](P4_L2_NEXT.md) |
+| **P4** | **8/26 起** | RN1 跟单 | **🟡 live 60s**；单笔 ≤$1；**无 Odds API**；L2 排队 → [P4_L2_NEXT.md](P4_L2_NEXT.md) |
 | **P5** | 贯穿 | 工程债 / 运维 | **✅ 核心已完成**（告警/Discord/redeem/M3/M4）；见 [未完成清单](#未完成--待办) |
 | **P6** | **8/26 起** | 运营观察 + 待决决策 | **🟡 进行中** → [下一步规划](#下一步规划p6-运营观察期) |
 
@@ -107,25 +107,25 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；P1 书面结论见 [P1_REVIEW.md](P1_REVIEW.m
 
 ---
 
-## P4 — RN1 体育 Maker 🟡 L1 live（L2 排队）
+## P4 — RN1 跟单 🟡 live（无 Odds API）
 
-独立 PM2：`polymarket-sports-rn1`（**`--live`**，300s）。  
-逻辑：Polymarket 足球「Will X win on date?」热门盘（0.50–0.85） vs **Pinnacle h2h**（The Odds API）→ GTC YES bid + **RN1 strict** 确认。  
-资金：`≤1% NAV/笔`，`≤2 笔/天`；台账 `daily_entries_sports.json` · `sports_pnl.json` · 90d 停损。  
-详见 [SPORTS_EXPERIMENT_COSTS.md](SPORTS_EXPERIMENT_COSTS.md)。
+独立 PM2：`polymarket-sports-rn1`（**`--live`**，**60s**）。  
+逻辑：轮询 RN1 钱包 data-api 成交 → **只跟新 BUY（YES/NO）** → GTC limit，**单笔 ≤ $1 USDC**。  
+**不再使用** The Odds API / Pinnacle。首轮 bootstrap 标记历史成交，避免回填跟单。  
+台账：`daily_entries_sports.json` · `sports_pnl.json` · `rn1_copy_seen.json` · 90d 停损。
 
 | 项 | 状态 |
 |---|---|
-| Odds API + Pinnacle 参考线 | ✅ `odds_api_client.py` |
-| RN1 聪明钱确认 | ✅ `rn1_tracker.py`，默认 `strict` |
+| RN1 成交拉取 | ✅ `rn1_tracker.py`（含 tx/asset） |
+| 纯跟单（无 Odds） | ✅ `strategy.py` mode=`sports_rn1_copy` |
+| 单笔 ≤ $1 USDC | ✅ `SPORTS_RN1_COPY_MAX_USDC` |
+| 去重 / bootstrap | ✅ `data/rn1_copy_seen.json` |
 | 体育 PnL + 90d 停损 | ✅ `sports_pnl.py` + `sports_guard.py` |
 | Discord 体育推送 | ✅ `sports_alerts.py` |
-| 防重复挂单 | ✅ open YES orders 检测 |
-| 市场发现 + 队名匹配 | ✅ `src/strategies/sports/` |
-| CLI `--sports-rn1` + PM2 live | ✅ 300s |
+| CLI `--sports-rn1` + PM2 live | ✅ **60s** |
 | Dashboard 体育面板 | ✅ Overview `render_sports_rn1_panel` |
 
-**L1 范围冻结。** 不在本阶段开发：**WebSocket 订单簿**、**双边 Maker 库存** → 见 **[P4 L2 下一阶段](P4_L2_NEXT.md)**。
+**L1 范围冻结（跟单版）。** 不在本阶段开发：**WebSocket 订单簿**、**双边 Maker 库存** → 见 **[P4 L2 下一阶段](P4_L2_NEXT.md)**。
 
 ---
 
@@ -208,7 +208,7 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；P1 书面结论见 [P1_REVIEW.md](P1_REVIEW.m
 | `polymarket-dashboard` | Streamlit :8501 | — |
 | `polymarket-btc15m` | **`--btc-15m-completeness --live`** | **60s** |
 | `polymarket-ops-alerts` | `ops_alerts.py --loop 120s` | **120s** |
-| `polymarket-sports-rn1` | **`--sports-rn1 --live`** | **300s** |
+| `polymarket-sports-rn1` | **`--sports-rn1 --live`（RN1 跟单 ≤$1）** | **60s** |
 
 ---
 

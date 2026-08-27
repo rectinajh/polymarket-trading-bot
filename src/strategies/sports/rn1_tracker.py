@@ -1,22 +1,19 @@
-"""Monitor RN1 (smart money) trades via Polymarket data-api for order confirmation."""
+"""RN1 wallet trade + open-position feed (Polymarket data-api)."""
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import httpx
 
 from src.strategies.sports.config import (
-    RN1_CONFIRM_MODE,
+    COPY_MAX_USDC,
     RN1_LOOKBACK_HOURS,
-    RN1_PRICE_TOLERANCE_TICKS,
     RN1_PROXY_WALLET,
 )
-from src.strategies.sports.discover import MatchWinnerMarket
-from src.strategies.sports.edge import MakerOpportunity
+from src.strategies.sports.soccer_filter import is_soccer_market
 
 DEFAULT_DATA_HOST = "https://data-api.polymarket.com"
 MAX_TRADE_PAGES = 5
@@ -29,39 +26,88 @@ class Rn1Trade:
     event_key: str
     side: str
     outcome: str
+    outcome_index: int
     price: float
     size: float
     timestamp: float
     title: str
+    asset: str = ""
+    tx_hash: str = ""
+    slug: str = ""
+    event_slug: str = ""
+    neg_risk: bool = False
+
+    def copy_key(self) -> str:
+        if self.tx_hash:
+            return f"tx:{self.tx_hash.lower()}"
+        return (
+            f"{self.condition_id}:{self.side}:{self.outcome_index}:"
+            f"{self.price:.4f}:{self.size:.4f}:{int(self.timestamp)}"
+        )
+
+    def position_key(self) -> str:
+        return f"pos:{self.condition_id}:{self.outcome_index}"
+
+    @property
+    def is_soccer(self) -> bool:
+        return is_soccer_market(self.title, self.slug, self.event_slug)
 
 
 @dataclass(frozen=True)
-class Rn1ConfirmResult:
-    confirmed: bool
-    mode: str
-    reason: str
-    matching_trade: Optional[Rn1Trade] = None
+class Rn1Position:
+    condition_id: str
+    outcome: str
+    outcome_index: int
+    size: float
+    avg_price: float
+    cur_price: float
+    title: str
+    slug: str = ""
+    event_slug: str = ""
+    asset: str = ""
+    neg_risk: bool = False
+    end_date: str = ""
+
+    def position_key(self) -> str:
+        return f"pos:{self.condition_id}:{self.outcome_index}"
+
+    @property
+    def is_soccer(self) -> bool:
+        return is_soccer_market(self.title, self.slug, self.event_slug)
+
+    @property
+    def copy_price(self) -> float:
+        """Prefer live mid/last; fall back to RN1 avg entry."""
+        if self.cur_price > 0:
+            return self.cur_price
+        return self.avg_price
 
 
-def extract_event_key(market: MatchWinnerMarket) -> str:
-    """Derive a stable event key for cross-market RN1 activity matching."""
-    raw = market.raw or {}
-    for ev in raw.get("events") or []:
-        if not isinstance(ev, dict):
-            continue
-        slug = ev.get("slug") or ev.get("ticker")
-        if slug:
-            return str(slug).lower()
+def copy_share_count(price: float, max_usdc: float = COPY_MAX_USDC) -> int:
+    """Exact CLOB-minimum size: max(5 shares, ceil($1.01 / price)).
 
-    slug = str(raw.get("slug") or raw.get("eventSlug") or "").lower()
-    if slug:
-        # Market slugs often append a team suffix: event-2026-08-25-team
-        parts = slug.rsplit("-", 1)
-        if len(parts) == 2 and len(parts[0]) > 8:
-            return parts[0]
-        return slug
+    ``max_usdc`` is unused for sizing (kept for call-site compat); spend is
+    whatever the exchange floor requires, capped by ``COPY_HARD_MAX_USDC``.
+    """
+    from math import ceil
 
-    return f"win-on-{market.match_date.isoformat()}"
+    from src.strategies.sports.config import (
+        COPY_HARD_MAX_USDC,
+        COPY_MIN_NOTIONAL,
+        COPY_MIN_SHARES,
+    )
+
+    if price <= 0:
+        return 0
+    want = max(
+        COPY_MIN_SHARES,
+        int(ceil(COPY_MIN_NOTIONAL / price - 1e-12)),
+    )
+    while want * price + 1e-9 < COPY_MIN_NOTIONAL:
+        want += 1
+    if want * price > COPY_HARD_MAX_USDC + 1e-9:
+        return 0
+    return want
 
 
 def _parse_trade(row: Dict[str, Any]) -> Optional[Rn1Trade]:
@@ -72,32 +118,78 @@ def _parse_trade(row: Dict[str, Any]) -> Optional[Rn1Trade]:
         ts = float(row.get("timestamp") or 0)
         price = float(row.get("price") or 0)
         size = float(row.get("size") or 0)
+        outcome_index = int(row.get("outcomeIndex") if row.get("outcomeIndex") is not None else -1)
     except (TypeError, ValueError):
         return None
     if ts <= 0 or price <= 0:
         return None
+    if outcome_index not in (0, 1):
+        # Infer from Yes/No labels when index missing.
+        label = str(row.get("outcome") or "").upper()
+        if label in ("YES", "Y"):
+            outcome_index = 0
+        elif label in ("NO", "N"):
+            outcome_index = 1
+        else:
+            return None
 
-    event_key = str(
-        row.get("eventSlug")
-        or row.get("event_slug")
-        or _event_key_from_slug(row.get("slug") or "")
+    slug = str(row.get("slug") or "")
+    event_slug = str(row.get("eventSlug") or row.get("event_slug") or "")
+    event_key = (event_slug or _event_key_from_slug(slug) or "").lower()
+    tx = str(
+        row.get("transactionHash")
+        or row.get("transaction_hash")
+        or row.get("txHash")
+        or row.get("hash")
         or ""
     ).lower()
-    if not event_key:
-        title = str(row.get("title") or "")
-        if " win on " in title.lower():
-            event_key = title.lower().split(" win on ")[-1].split("?")[0].strip()
-            event_key = f"win-on-{event_key}"
 
     return Rn1Trade(
         condition_id=cond,
         event_key=event_key,
         side=str(row.get("side") or "").upper(),
         outcome=str(row.get("outcome") or "").upper(),
+        outcome_index=outcome_index,
         price=price,
         size=size,
         timestamp=ts,
-        title=str(row.get("title") or "")[:120],
+        title=str(row.get("title") or "")[:160],
+        asset=str(row.get("asset") or row.get("asset_id") or row.get("tokenId") or ""),
+        tx_hash=tx,
+        slug=slug,
+        event_slug=event_slug,
+        neg_risk=bool(row.get("negativeRisk") or row.get("negRisk") or False),
+    )
+
+
+def _parse_position(row: Dict[str, Any]) -> Optional[Rn1Position]:
+    cond = str(row.get("conditionId") or row.get("condition_id") or "").lower()
+    if not cond:
+        return None
+    try:
+        size = float(row.get("size") or 0)
+        avg = float(row.get("avgPrice") or row.get("avg_price") or 0)
+        cur = float(row.get("curPrice") or row.get("cur_price") or 0)
+        outcome_index = int(
+            row.get("outcomeIndex") if row.get("outcomeIndex") is not None else -1
+        )
+    except (TypeError, ValueError):
+        return None
+    if size <= 0 or outcome_index not in (0, 1):
+        return None
+    return Rn1Position(
+        condition_id=cond,
+        outcome=str(row.get("outcome") or ""),
+        outcome_index=outcome_index,
+        size=size,
+        avg_price=avg,
+        cur_price=cur,
+        title=str(row.get("title") or "")[:160],
+        slug=str(row.get("slug") or ""),
+        event_slug=str(row.get("eventSlug") or ""),
+        asset=str(row.get("asset") or ""),
+        neg_risk=bool(row.get("negativeRisk") or row.get("negRisk") or False),
+        end_date=str(row.get("endDate") or row.get("end_date") or ""),
     )
 
 
@@ -112,7 +204,7 @@ def _event_key_from_slug(slug: str) -> str:
 
 
 class RN1WalletTracker:
-    """Fetch and cache recent RN1 trades from Polymarket data-api."""
+    """Fetch RN1 trades + open positions from Polymarket data-api."""
 
     def __init__(
         self,
@@ -126,11 +218,15 @@ class RN1WalletTracker:
         self.data_host = data_host.rstrip("/")
         self._trades: List[Rn1Trade] = []
         self._fetched_at: float = 0.0
-        self._cache_ttl_s: float = 120.0
+        self._cache_ttl_s: float = 30.0
 
     @property
     def trade_count(self) -> int:
         return len(self._trades)
+
+    @property
+    def trades(self) -> List[Rn1Trade]:
+        return list(self._trades)
 
     async def refresh(self, *, force: bool = False) -> int:
         now = time.time()
@@ -168,82 +264,34 @@ class RN1WalletTracker:
             if parsed and parsed.timestamp >= cutoff:
                 trades.append(parsed)
 
+        trades.sort(key=lambda t: t.timestamp, reverse=True)
         self._trades = trades
         self._fetched_at = now
         return len(trades)
 
-    def by_condition(self) -> Dict[str, List[Rn1Trade]]:
-        out: Dict[str, List[Rn1Trade]] = {}
-        for t in self._trades:
-            out.setdefault(t.condition_id, []).append(t)
-        return out
-
-    def by_event(self) -> Dict[str, List[Rn1Trade]]:
-        out: Dict[str, List[Rn1Trade]] = {}
-        for t in self._trades:
-            if t.event_key:
-                out.setdefault(t.event_key, []).append(t)
-        return out
-
-
-def rn1_confirms(
-    opp: MakerOpportunity,
-    tracker: RN1WalletTracker,
-    *,
-    mode: Optional[str] = None,
-    price_tolerance_ticks: int = RN1_PRICE_TOLERANCE_TICKS,
-    lookback_hours: Optional[float] = None,
-) -> Rn1ConfirmResult:
-    """Layer-2 filter: require RN1 smart-money alignment before placing."""
-    mode_l = (mode or RN1_CONFIRM_MODE).lower().strip()
-    if mode_l in ("off", "none", "disabled", "0", "false"):
-        return Rn1ConfirmResult(True, mode_l, "confirmation disabled")
-
-    lookback = lookback_hours if lookback_hours is not None else tracker.lookback_hours
-    now = time.time()
-    cutoff = now - lookback * 3600.0
-    tick = opp.market.tick_size or 0.01
-    max_yes_price = opp.maker_price + price_tolerance_ticks * tick
-
-    if mode_l == "event":
-        event_key = extract_event_key(opp.market)
-        for t in tracker.by_event().get(event_key, []):
-            if t.timestamp < cutoff:
-                continue
-            if t.side != "BUY":
-                continue
-            return Rn1ConfirmResult(
-                True,
-                mode_l,
-                f"RN1 active on event {event_key}",
-                matching_trade=t,
+    async def fetch_open_soccer_positions(self) -> List[Rn1Position]:
+        """Live (non-redeemable) soccer positions still priced in (0, 0.99)."""
+        out: List[Rn1Position] = []
+        async with httpx.AsyncClient(timeout=30.0) as http:
+            resp = await http.get(
+                f"{self.data_host}/positions",
+                params={
+                    "user": self.wallet,
+                    "redeemable": "false",
+                    "sizeThreshold": 0.01,
+                    "limit": 500,
+                },
             )
-        return Rn1ConfirmResult(
-            False,
-            mode_l,
-            f"no RN1 BUY on event {event_key} in last {lookback:.0f}h",
-        )
-
-    # strict (default): same condition, YES BUY, price within tolerance
-    cond = opp.market.condition_id.lower()
-    for t in tracker.by_condition().get(cond, []):
-        if t.timestamp < cutoff:
-            continue
-        if t.side != "BUY":
-            continue
-        if t.outcome not in ("YES", "Y"):
-            continue
-        if t.price > max_yes_price + 1e-6:
-            continue
-        return Rn1ConfirmResult(
-            True,
-            mode_l,
-            f"RN1 YES BUY @ {t.price:.2f} ≤ our {opp.maker_price:.2f}+{price_tolerance_ticks}tick",
-            matching_trade=t,
-        )
-
-    return Rn1ConfirmResult(
-        False,
-        mode_l,
-        f"no RN1 YES BUY on {cond[:12]}… within {lookback:.0f}h @ ≤{max_yes_price:.2f}",
-    )
+            resp.raise_for_status()
+            rows = resp.json() or []
+        if not isinstance(rows, list):
+            return out
+        for row in rows:
+            pos = _parse_position(row)
+            if not pos or not pos.is_soccer:
+                continue
+            if pos.cur_price <= 0 or pos.cur_price >= 0.99:
+                continue
+            out.append(pos)
+        out.sort(key=lambda p: -p.size)
+        return out

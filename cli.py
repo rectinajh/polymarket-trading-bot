@@ -68,12 +68,12 @@ def cmd_run(args: argparse.Namespace) -> None:
         )
         return
 
-    # --sports-rn1: independent RN1 sports Maker sleeve
+    # --sports-rn1: independent RN1 copy-trade sleeve
     if sports_rn1:
         _run_sports_rn1(
             live_mode=live_mode,
             loop=getattr(args, "loop", False),
-            interval=getattr(args, "interval", 300),
+            interval=getattr(args, "interval", 60),
         )
         return
 
@@ -323,68 +323,64 @@ def _run_btc_15m_completeness(
 def _run_sports_rn1(
     live_mode: bool = False,
     loop: bool = False,
-    interval: int = 300,
+    interval: int = 60,
 ) -> None:
-    """Independent RN1 sports Maker sleeve (Pinnacle + favorite YES bids)."""
+    """Independent RN1 copy-trade sleeve (no Odds API; ≤$1 USDC/order)."""
     from src.clients import build_polymarket_clients
-    from src.clients.odds_api_client import OddsAPIClient
     from src.strategies.sports import Rn1SportsMaker
+    from src.strategies.sports.config import COPY_MAX_USDC, MAX_ENTRIES_PER_DAY
 
     _apply_live_flags(live_mode)
 
-    print("⚽ RN1 SPORTS MAKER SLEEVE")
+    print("⚽ RN1 COPY-TRADE SLEEVE")
     print("   Independent from Conservative. Separate daily_entries_sports.json.")
-    print("   Requires THE_ODDS_API_KEY (Pinnacle via The Odds API).")
-    print("   Layer 2: RN1 smart-money confirm (default mode=strict).")
+    print("   No The Odds API — mirrors RN1 BUY trades from data-api.")
+    print(f"   Cap: ≤${COPY_MAX_USDC:.2f} USDC/order · ≤{MAX_ENTRIES_PER_DAY}/day.")
     if not live_mode:
         print("   DRY RUN — no real orders (pass --live to trade)")
     if loop:
         print(f"   Continuous — every {interval}s. Ctrl-C to stop.")
     if live_mode:
-        print("   ⚠️  LIVE: directional sports risk; keep sleeve ≤1% NAV/position.")
+        print("   ⚠️  LIVE: directional copy risk; each fill ≤$1 USDC.")
 
     async def _run_once():
         async with build_polymarket_clients() as (client, gamma):
-            async with OddsAPIClient() as odds:
-                strat = Rn1SportsMaker(
-                    client=client,
-                    gamma=gamma,
-                    odds=odds,
-                    dry_run=not live_mode,
-                )
-                try:
-                    return await strat.run()
-                finally:
-                    await strat.close()
+            strat = Rn1SportsMaker(
+                client=client,
+                gamma=gamma,
+                dry_run=not live_mode,
+            )
+            try:
+                return await strat.run()
+            finally:
+                await strat.close()
 
     async def _run_forever():
         cycle = 0
         async with build_polymarket_clients() as (client, gamma):
-            async with OddsAPIClient() as odds:
-                strat = Rn1SportsMaker(
-                    client=client,
-                    gamma=gamma,
-                    odds=odds,
-                    dry_run=not live_mode,
-                )
-                try:
-                    while True:
-                        cycle += 1
+            strat = Rn1SportsMaker(
+                client=client,
+                gamma=gamma,
+                dry_run=not live_mode,
+            )
+            try:
+                while True:
+                    cycle += 1
+                    print(
+                        f"\n──── Sports RN1 Copy Cycle {cycle} — "
+                        f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ────"
+                    )
+                    try:
+                        await strat.run()
+                    except Exception as exc:
                         print(
-                            f"\n──── Sports RN1 Cycle {cycle} — "
-                            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ────"
+                            f"Cycle {cycle} failed: {exc}. "
+                            f"Continuing after {interval}s."
                         )
-                        try:
-                            await strat.run()
-                        except Exception as exc:
-                            print(
-                                f"Cycle {cycle} failed: {exc}. "
-                                f"Continuing after {interval}s."
-                            )
-                        print(f"\n⏳ Sleeping {interval}s...")
-                        await asyncio.sleep(interval)
-                finally:
-                    await strat.close()
+                    print(f"\n⏳ Sleeping {interval}s...")
+                    await asyncio.sleep(interval)
+            finally:
+                await strat.close()
 
     try:
         if loop:
@@ -1032,7 +1028,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--sports-rn1",
         action="store_true",
         dest="sports_rn1",
-        help="RN1 sports Maker sleeve: Pinnacle ref + favorite YES bids (dry-run default)",
+        help="RN1 copy-trade sleeve: mirror RN1 BUY, ≤$1 USDC/order (dry-run default)",
     )
     p_run.add_argument(
         "--loop",

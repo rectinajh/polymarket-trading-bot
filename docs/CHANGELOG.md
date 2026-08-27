@@ -9,6 +9,39 @@ PnL 数字仍记在 [NET_PNL.md](NET_PNL.md)。**阶段计划与决策门**见 [
 
 ---
 
+## 2026-08-27 — 跟 RN1 平仓 + 自动止损（止盈手动）
+
+- 每轮先跑 exits：RN1 不再持有同侧 → 市价/限价卖出我们的跟单仓
+- 单仓止损默认 **−20%**（`SPORTS_RN1_STOP_LOSS_PCT`）；**无自动止盈**
+- `sports_pnl` 按 `condition:side` 记账，修复 NO 仓被误标 lost
+- Discord：`notify_sports_exit`
+
+---
+
+## 2026-08-27 — RN1 纯足球跟单（镜像持仓 + 持续监控）
+
+**目的：** 只跟足球；同步 RN1 当前足球仓方向；忽略网球/电竞等。
+
+- `soccer_filter.py`：足球判定；排除 ITF/CS/MLB 等
+- 每轮：拉 RN1 `positions?redeemable=false` 同步未跟过的足球仓
+- 新成交：只跟 soccer BUY（同 `outcomeIndex` → YES/NO）
+- 仓位：满足 CLOB **≥5 股 / ≥$1**；目标 $1，硬顶 $5（`COPY_HARD_MAX_USDC`）
+- PM2 60s live；首轮已同步 **16** 笔足球方向
+
+---
+
+## 2026-08-27 — P4 改为 RN1 纯跟单（弃用 Odds API）
+
+**目的：** Odds API 额度贵且已耗尽；改为直接跟 RN1 钱包成交，单笔硬顶 $1 USDC。
+
+- `strategy.py`：mode=`sports_rn1_copy`；轮询 RN1 BUY → GTC；**无 Pinnacle**
+- `rn1_tracker.py`：解析 `tx_hash` / `asset`；`copy_share_count`
+- 去重：`data/rn1_copy_seen.json`（首轮 bootstrap 不回填）
+- 环境：`SPORTS_RN1_COPY_MAX_USDC=1`、日限默认 10；PM2 间隔 **60s**
+- CLI / Dashboard / ROADMAP 同步；不再依赖 `THE_ODDS_API_KEY`
+
+---
+
 ## 2026-08-26 — P6 运营观察期规划（ROADMAP）
 
 **目的：** 代码 sprint 收尾后进入「先运营、再决策、后开发」阶段；待决项写入路线图。

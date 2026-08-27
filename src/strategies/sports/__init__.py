@@ -1,11 +1,11 @@
-"""RN1 sports Maker sleeve (P4).
+"""RN1 soccer copy-trade sleeve (P4).
 
-Compares Polymarket soccer match-winner favorites to Pinnacle h2h odds
-via The Odds API. Layer 2 requires RN1 smart-money confirmation before
-placing small GTC YES bids when fair_prob − bid ≥ MIN_EDGE.
+Mirrors RN1 **football** wallet positions & BUY trades only
+(tennis / CS / MLB ignored). Same outcome side; size meets CLOB mins
+(≥5 shares, ≥$1) while preferring ~$1 and hard-capping at $5.
 
-Independent ledger: ``data/daily_entries_sports.json`` · ``data/sports_pnl.json``.
-L1 is live via PM2 ``--live``; L2 (WebSocket book + bilateral inventory) is queued — see ``docs/P4_L2_NEXT.md``.
+Ledgers: ``data/daily_entries_sports.json`` · ``data/sports_pnl.json``
+De-dupe: ``data/rn1_copy_seen.json``
 """
 
 from .strategy import Rn1SportsMaker
