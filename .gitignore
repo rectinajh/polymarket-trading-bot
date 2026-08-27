@@ -21,6 +21,7 @@ data/ops_metrics.json
 data/min_edge_experiment.json
 data/orphan_positions.json
 data/btc15m_window_pnl.json
+data/rn1_copy_seen.json
 config.json
 
 # Database files
