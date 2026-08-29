@@ -1,9 +1,14 @@
-"""Unit tests for RN1 soccer copy helpers."""
+"""Unit tests for RN1 soccer/tennis copy helpers."""
 
 from __future__ import annotations
 
 from src.strategies.sports.rn1_tracker import _parse_trade, copy_share_count
-from src.strategies.sports.soccer_filter import is_soccer_market, side_from_outcome_index
+from src.strategies.sports.soccer_filter import (
+    is_copyable_market,
+    is_soccer_market,
+    is_tennis_market,
+    side_from_outcome_index,
+)
 from src.strategies.sports.strategy import _team_from_title
 
 
@@ -43,6 +48,67 @@ def test_is_soccer_excludes_tennis_cs_mlb():
     )
 
 
+def test_is_soccer_excludes_college_football_usc():
+    assert not is_soccer_market("Spread: USC (-27.5)")
+    assert not is_soccer_market(
+        "Spread: USC (-38.5)",
+        slug="cfb-usc-sjsu-spread",
+    )
+
+
+def test_is_tennis_atp_wta():
+    assert is_tennis_market(
+        "ATP Cincinnati: Player A vs Player B",
+        slug="atp-cin-a-b-2026-08-15",
+    )
+    assert is_tennis_market(
+        "WTA US Open: X vs Y",
+        slug="wta-uso-x-y-2026-08-28",
+    )
+    assert not is_tennis_market(
+        "ITF MEN - SINGLES: M25 Poznan",
+        slug="itf-savano-catini-2026-08-27",
+    )
+    assert is_tennis_market(
+        "ITF MEN - SINGLES: M25 Poznan",
+        slug="itf-savano-catini-2026-08-27",
+        include_itf=True,
+    )
+    assert not is_tennis_market(
+        "ATP Doubles: A/B vs C/D",
+        slug="atp-doubles-ab-cd",
+    )
+    assert not is_tennis_market(
+        "Counter-Strike: Leo vs Butterfly",
+        slug="cs2-leo-btf",
+    )
+
+
+def test_is_copyable_soccer_and_tennis():
+    assert is_copyable_market("Will SC Freiburg win on 2026-08-27?")
+    assert is_copyable_market(
+        "ATP Cincinnati: A vs B",
+        slug="atp-cin-a-b",
+        allow_tennis=True,
+    )
+    assert not is_copyable_market(
+        "ATP Cincinnati: A vs B",
+        slug="atp-cin-a-b",
+        allow_tennis=False,
+    )
+    assert not is_copyable_market(
+        "Spread: USC (-27.5)",
+        slug="cfb-usc-sjsu-spread",
+    )
+
+
+def test_default_price_band():
+    from src.strategies.sports.config import COPY_PRICE_MAX, COPY_PRICE_MIN
+
+    assert COPY_PRICE_MIN == 0.35
+    assert COPY_PRICE_MAX == 0.75
+
+
 def test_side_from_outcome_index():
     assert side_from_outcome_index(0) == "yes"
     assert side_from_outcome_index(1) == "no"
@@ -67,6 +133,7 @@ def test_parse_trade_soccer_with_index():
     assert t is not None
     assert t.outcome_index == 1
     assert t.is_soccer is True
+    assert t.is_copyable is True
     assert t.position_key() == "pos:0xcond:1"
 
 
@@ -74,3 +141,24 @@ def test_stop_loss_threshold():
     entry, cur, pct = 0.50, 0.39, 0.20
     assert cur <= entry * (1.0 - pct)
     assert not (0.45 <= entry * (1.0 - pct))
+
+
+def test_sync_open_positions_default_off():
+    from src.strategies.sports.config import COPY_SYNC_OPEN_POSITIONS
+
+    assert COPY_SYNC_OPEN_POSITIONS is False
+
+
+def test_fresh_guard_allows_after_reset(tmp_path):
+    from pathlib import Path
+    from src.strategies.sports.sports_guard import check_trading_allowed
+    from src.strategies.sports.sports_pnl import SportsPnL
+    from src.strategies.capital_policy import trading_day
+
+    path = tmp_path / "sports_pnl.json"
+    pnl = SportsPnL(path)
+    data = {"experiment_start": trading_day(), "entries": []}
+    pnl._save(data)
+    allowed, reason, _ = check_trading_allowed(nav_cents=11097, pnl=pnl)
+    assert allowed is True
+    assert reason == "ok"

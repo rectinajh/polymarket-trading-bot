@@ -21,12 +21,36 @@ COPY_HARD_MAX_USDC = float(os.getenv("SPORTS_RN1_COPY_HARD_MAX_USDC", "5.0"))
 # Max copy fills per Shanghai trading day (each ≤ COPY_MAX_USDC).
 MAX_ENTRIES_PER_DAY = int(os.getenv("SPORTS_RN1_MAX_ENTRIES_PER_DAY", "25"))
 
-# Soccer-only copy (tennis / CS / MLB ignored).
+# Whitelist sports only (soccer + optional tennis). Legacy name kept.
 COPY_SOCCER_ONLY = (os.getenv("SPORTS_RN1_SOCCER_ONLY", "true").strip().lower()
                     not in ("0", "false", "no", "off"))
+# Allow ATP/WTA singles alongside soccer (ITF/doubles off by default).
+COPY_ALLOW_TENNIS = (
+    os.getenv("SPORTS_RN1_ALLOW_TENNIS", "true").strip().lower()
+    not in ("0", "false", "no", "off")
+)
+COPY_TENNIS_INCLUDE_ITF = (
+    os.getenv("SPORTS_RN1_TENNIS_INCLUDE_ITF", "false").strip().lower()
+    in ("1", "true", "yes", "on")
+)
+COPY_TENNIS_INCLUDE_DOUBLES = (
+    os.getenv("SPORTS_RN1_TENNIS_INCLUDE_DOUBLES", "false").strip().lower()
+    in ("1", "true", "yes", "on")
+)
+
+# Mirror RN1 *open* soccer book on bootstrap. Default OFF — only copy new BUYs.
+# (Bulk sync on 2026-08-27 blew the daily/drawdown guard.)
+COPY_SYNC_OPEN_POSITIONS = (
+    os.getenv("SPORTS_RN1_SYNC_OPEN_POSITIONS", "false").strip().lower()
+    in ("1", "true", "yes", "on")
+)
 
 # Only follow RN1 BUY trades (YES/NO). SELL ignored.
 COPY_SIDES = ("BUY",)
+
+# After EXIT FAIL, skip re-trying the same hold for this many seconds
+# (unless redeemable — redeem is attempted immediately).
+COPY_EXIT_FAIL_COOLDOWN_S = float(os.getenv("SPORTS_RN1_EXIT_FAIL_COOLDOWN_S", "1800"))
 
 # Per-position stop-loss (fraction). Take-profit is manual — no auto TP.
 # 0.20 = exit when mark ≤ entry × 80% (≈ −20%).
@@ -37,9 +61,9 @@ COPY_FOLLOW_RN1_EXIT = (
     not in ("0", "false", "no", "off")
 )
 
-# Skip copy when RN1 price outside band.
-COPY_PRICE_MIN = float(os.getenv("SPORTS_RN1_COPY_PRICE_MIN", "0.05"))
-COPY_PRICE_MAX = float(os.getenv("SPORTS_RN1_COPY_PRICE_MAX", "0.95"))
+# Skip copy when RN1 price outside band (avoid lottery tails / locks).
+COPY_PRICE_MIN = float(os.getenv("SPORTS_RN1_COPY_PRICE_MIN", "0.35"))
+COPY_PRICE_MAX = float(os.getenv("SPORTS_RN1_COPY_PRICE_MAX", "0.75"))
 
 MAX_SCAN_CYCLES = 2000
 

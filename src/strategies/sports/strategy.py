@@ -1,4 +1,4 @@
-"""RN1 soccer copy-trade — mirror football bets only, ≤$1 USDC/order."""
+"""RN1 sports copy-trade — soccer + optional tennis, ≤$1 USDC/order."""
 
 from __future__ import annotations
 
@@ -14,6 +14,8 @@ from typing import Any, Dict, Optional, Set, Tuple
 from src.clients.gamma_client import GammaClient
 from src.strategies.capital_policy import DailyEntryLog
 from src.strategies.sports.config import (
+    COPY_ALLOW_TENNIS,
+    COPY_EXIT_FAIL_COOLDOWN_S,
     COPY_FOLLOW_RN1_EXIT,
     COPY_HARD_MAX_USDC,
     COPY_MAX_USDC,
@@ -23,6 +25,7 @@ from src.strategies.sports.config import (
     COPY_PRICE_MIN,
     COPY_SIDES,
     COPY_STOP_LOSS_PCT,
+    COPY_SYNC_OPEN_POSITIONS,
     DEFAULT_COPY_SEEN,
     DEFAULT_LEDGER,
     DEFAULT_SCAN_LOG,
@@ -36,7 +39,7 @@ from src.strategies.sports.rn1_tracker import (
     RN1WalletTracker,
     copy_share_count,
 )
-from src.strategies.sports.soccer_filter import side_from_outcome_index
+from src.strategies.sports.soccer_filter import is_tennis_market, side_from_outcome_index
 from src.strategies.sports.sports_alerts import (
     notify_sports_exit,
     notify_sports_halt,
@@ -51,7 +54,7 @@ logger = logging.getLogger(__name__)
 
 
 class Rn1SportsMaker:
-    """Copy RN1 **soccer** positions & BUY trades; hard-capped at COPY_MAX_USDC."""
+    """Copy RN1 soccer (+ tennis) BUY trades; hard-capped at COPY_MAX_USDC."""
 
     def __init__(
         self,
@@ -82,6 +85,10 @@ class Rn1SportsMaker:
         self._halt_notified = False
         self._seen: Set[str] = self._load_seen()
         self._bootstrapped = bool(self._seen)
+        # hold_key -> unix ts when last EXIT FAIL happened (cooldown)
+        self._exit_fail_until: Dict[str, float] = {}
+        # Seal lookback once per process so restart never backfills 6h of trades.
+        self._lookback_sealed = False
 
     def _load_seen(self) -> Set[str]:
         try:
@@ -105,7 +112,7 @@ class Rn1SportsMaker:
             payload = {
                 "updated": datetime.now(timezone.utc).isoformat(),
                 "wallet": RN1_PROXY_WALLET,
-                "mode": "soccer_only",
+                "mode": "soccer_tennis" if COPY_ALLOW_TENNIS else "soccer_only",
                 "keys": sorted(self._seen),
             }
             tmp = self.seen_path.with_suffix(".json.tmp")
@@ -119,14 +126,17 @@ class Rn1SportsMaker:
             self.dry_run = dry_run
 
         t0 = time.time()
+        sports_mode = "soccer+tennis" if COPY_ALLOW_TENNIS else "soccer"
         stats: Dict[str, Any] = {
-            "mode": "sports_rn1_soccer_copy",
+            "mode": "sports_rn1_copy",
             "live": not self.dry_run,
             "copy_max_usdc": COPY_MAX_USDC,
-            "soccer_only": True,
+            "sports_mode": sports_mode,
+            "allow_tennis": COPY_ALLOW_TENNIS,
+            "price_band": [COPY_PRICE_MIN, COPY_PRICE_MAX],
             "scanned": 0,
-            "soccer_trades": 0,
-            "open_soccer_positions": 0,
+            "copyable_trades": 0,
+            "open_copyable_positions": 0,
             "new_signals": 0,
             "opportunities": 0,
             "attempted": 0,
@@ -150,14 +160,16 @@ class Rn1SportsMaker:
         rejects: Counter = Counter()
 
         print(
-            "\n⚽ RN1 SOCCER COPY — football only + follow-exit + SL",
+            f"\nRN1 COPY — {sports_mode} + follow-exit + SL",
             flush=True,
         )
         print(
-            f"   Rules: soccer only | CLOB min {COPY_MIN_SHARES}sh / "
+            f"   Rules: {sports_mode} | price [{COPY_PRICE_MIN:.2f},{COPY_PRICE_MAX:.2f}] | "
+            f"CLOB min {COPY_MIN_SHARES}sh / "
             f"${COPY_MIN_NOTIONAL:.2f} | "
             f"SL {COPY_STOP_LOSS_PCT*100:.0f}% | "
             f"follow RN1 exit={'ON' if COPY_FOLLOW_RN1_EXIT else 'OFF'} | "
+            f"sync open={'ON' if COPY_SYNC_OPEN_POSITIONS else 'OFF'} | "
             f"TP=manual | "
             f"≤{MAX_ENTRIES_PER_DAY}/day | "
             f"{'DRY RUN' if self.dry_run else 'LIVE'}",
@@ -188,24 +200,45 @@ class Rn1SportsMaker:
                 title=str(entry.get("title") or ""),
             )
 
-        # RN1 open soccer book (needed for exits + copy)
+        # RN1 open copyable book (needed for exits + copy)
         try:
-            rn1_pos = await self.rn1.fetch_open_soccer_positions()
+            rn1_pos = await self.rn1.fetch_open_copyable_positions()
         except Exception as exc:
             logger.warning("RN1 positions fetch failed: %s", exc)
             stats["errors"] += 1
             rn1_pos = []
-        stats["open_soccer_positions"] = len(rn1_pos)
+        stats["open_copyable_positions"] = len(rn1_pos)
         rn1_held: Set[str] = set()
         for rp in rn1_pos:
             side = side_from_outcome_index(rp.outcome_index)
             if side:
                 rn1_held.add(f"{rp.condition_id.lower()}:{side}")
         print(
-            f"   RN1 open soccer positions: {len(rn1_pos)} "
+            f"   RN1 open copyable positions: {len(rn1_pos)} "
             f"({len(rn1_held)} sides)",
             flush=True,
         )
+
+        # Seal lookback ASAP (even if Guard later blocks entries).
+        if not self._lookback_sealed:
+            try:
+                await self.rn1.refresh(force=True)
+            except Exception as exc:
+                logger.warning("RN1 seal refresh failed: %s", exc)
+            for t in self.rn1.trades:
+                self._seen.add(t.copy_key())
+                if t.is_copyable:
+                    self._seen.add(t.position_key())
+            for pos in rn1_pos:
+                self._seen.add(pos.position_key())
+            self._lookback_sealed = True
+            self._bootstrapped = True
+            self._save_seen()
+            print(
+                f"   Sealed lookback: {len(self.rn1.trades)} trade keys + "
+                f"{len(rn1_pos)} open sides (no backfill).",
+                flush=True,
+            )
 
         # --- Exits first (always): stop-loss + follow RN1 flat ---
         await self._manage_exits(
@@ -262,36 +295,48 @@ class Rn1SportsMaker:
             except Exception as exc:
                 logger.warning("Open orders fetch failed: %s", exc)
 
-        # --- 1) Sync RN1 open soccer positions (current book) ---
-        for pos in rn1_pos:
-            if remaining <= 0:
-                rejects["daily_cap"] += 1
-                break
-            key = pos.position_key()
-            if key in self._seen:
-                rejects["already_synced"] += 1
-                continue
-            placed, cash, remaining = await self._copy_one(
-                condition_id=pos.condition_id,
-                title=pos.title,
-                outcome_label=pos.outcome,
-                outcome_index=pos.outcome_index,
-                price=pos.copy_price,
-                rn1_size=pos.size,
-                neg_risk=pos.neg_risk,
-                source="position",
-                dedupe_key=key,
-                cash=cash,
-                remaining=remaining,
-                our_held=our_held,
-                open_orders=open_orders,
-                stats=stats,
-                rejects=rejects,
+        # --- 1) Optionally sync RN1 open copyable book (default OFF) ---
+        if COPY_SYNC_OPEN_POSITIONS:
+            for pos in rn1_pos:
+                if remaining <= 0:
+                    rejects["daily_cap"] += 1
+                    break
+                key = pos.position_key()
+                if key in self._seen:
+                    rejects["already_synced"] += 1
+                    continue
+                placed, cash, remaining = await self._copy_one(
+                    condition_id=pos.condition_id,
+                    title=pos.title,
+                    outcome_label=pos.outcome,
+                    outcome_index=pos.outcome_index,
+                    price=pos.copy_price,
+                    rn1_size=pos.size,
+                    neg_risk=pos.neg_risk,
+                    source="position",
+                    dedupe_key=key,
+                    cash=cash,
+                    remaining=remaining,
+                    our_held=our_held,
+                    open_orders=open_orders,
+                    stats=stats,
+                    rejects=rejects,
+                    slug=pos.slug,
+                    event_slug=pos.event_slug,
+                )
+                if placed:
+                    stats["synced_positions"] += 1
+        else:
+            # Still mark current open sides as seen so we don't double-copy
+            # if sync is later enabled for the same book.
+            for pos in rn1_pos:
+                self._seen.add(pos.position_key())
+            print(
+                "   Sync open positions: OFF (only new RN1 BUY trades)",
+                flush=True,
             )
-            if placed:
-                stats["synced_positions"] += 1
 
-        # --- 2) Poll new soccer BUY trades ---
+        # --- 2) Poll new copyable BUY trades ---
         try:
             rn1_count = await self.rn1.refresh(force=True)
             stats["rn1_trades_cached"] = rn1_count
@@ -310,39 +355,18 @@ class Rn1SportsMaker:
 
         trades = self.rn1.trades
         stats["scanned"] = len(trades)
-        soccer_trades = [t for t in trades if t.is_soccer]
-        stats["soccer_trades"] = len(soccer_trades)
+        copyable_trades = [t for t in trades if t.is_copyable]
+        stats["copyable_trades"] = len(copyable_trades)
 
-        # First boot: mark non-soccer + already-handled soccer trade keys as seen
-        # (positions already synced above). Do NOT skip future soccer trades.
-        if not self._bootstrapped:
-            for t in trades:
-                if not t.is_soccer:
-                    self._seen.add(t.copy_key())
-                else:
-                    # Mark historical soccer trade keys so we don't double-fire
-                    # after position sync; new trades after this timestamp still copy.
-                    self._seen.add(t.copy_key())
-            self._bootstrapped = True
-            self._save_seen()
-            stats["bootstrapped"] = 1
-            print(
-                f"   Bootstrap: soccer positions synced={stats['synced_positions']}; "
-                f"marked {len(trades)} trade keys (non-soccer ignored forever).",
-                flush=True,
-            )
-            self._append_scan(stats, t0)
-            return stats
-
-        unseen = [t for t in soccer_trades if t.copy_key() not in self._seen]
-        # Also mark non-soccer as seen so the set stays clean.
+        # Lookback already sealed at cycle start; only copy trades newer than seal.
+        unseen = [t for t in copyable_trades if t.copy_key() not in self._seen]
         for t in trades:
-            if not t.is_soccer:
+            if not t.is_copyable:
                 self._seen.add(t.copy_key())
 
         unseen.sort(key=lambda t: t.timestamp)
         stats["new_signals"] = len(unseen)
-        print(f"   New soccer BUY signals: {len(unseen)}", flush=True)
+        print(f"   New copyable BUY signals: {len(unseen)}", flush=True)
 
         for trade in unseen:
             key = trade.copy_key()
@@ -370,6 +394,8 @@ class Rn1SportsMaker:
                 open_orders=open_orders,
                 stats=stats,
                 rejects=rejects,
+                slug=trade.slug,
+                event_slug=trade.event_slug,
             )
 
         # Re-read remaining/cash is awkward after loop; _copy_one updates
@@ -400,6 +426,8 @@ class Rn1SportsMaker:
         open_orders: Set[str],
         stats: Dict[str, Any],
         rejects: Counter,
+        slug: str = "",
+        event_slug: str = "",
     ) -> Tuple[bool, int, int]:
         """Place one mirror order. Returns (placed, cash, remaining)."""
         side = side_from_outcome_index(outcome_index)
@@ -475,7 +503,7 @@ class Rn1SportsMaker:
             cash -= cost_cents
             remaining -= 1
             our_held.add(hold_key)
-            self._entries.record(entry_key, title, kind="sports_rn1_soccer")
+            self._entries.record(entry_key, title, kind="sports_rn1_copy")
             return True, cash, remaining
 
         try:
@@ -502,8 +530,13 @@ class Rn1SportsMaker:
             remaining -= 1
             our_held.add(hold_key)
             open_orders.add(hold_key)
-            self._entries.record(entry_key, title, kind="sports_rn1_soccer")
+            self._entries.record(entry_key, title, kind="sports_rn1_copy")
             team = _team_from_title(title)
+            sport_tag = (
+                "rn1_tennis_copy"
+                if is_tennis_market(title, slug, event_slug)
+                else "rn1_soccer_copy"
+            )
             self._pnl.record_entry(
                 condition_id=condition_id,
                 title=title,
@@ -513,7 +546,7 @@ class Rn1SportsMaker:
                 price=price,
                 fair_prob=price,
                 edge=0.0,
-                sport="rn1_soccer_copy",
+                sport=sport_tag,
                 match=f"{outcome_label} | {title[:60]}",
                 live=True,
                 side=side,
@@ -527,7 +560,7 @@ class Rn1SportsMaker:
                 fair_prob=price,
                 live=True,
                 condition_id=condition_id,
-                rn1_reason=f"soccer {source} {side}({outcome_label}) @ {price:.2f}",
+                rn1_reason=f"{sport_tag} {source} {side}({outcome_label}) @ {price:.2f}",
             )
             return True, cash, remaining
         except Exception as exc:
@@ -588,6 +621,7 @@ class Rn1SportsMaker:
                     "cur": cur,
                     "title": title,
                     "neg_risk": bool(p.get("negative_risk") or p.get("negRisk")),
+                    "redeemable": bool(p.get("redeemable")),
                     "hold_key": hold_key,
                 }
             )
@@ -602,38 +636,50 @@ class Rn1SportsMaker:
             flush=True,
         )
 
+        now_ts = time.time()
         for c in candidates:
-            reason = ""
-            entry = c["entry"]
-            cur = c["cur"]
-            if entry > 0 and cur > 0 and COPY_STOP_LOSS_PCT > 0:
-                if cur <= entry * (1.0 - COPY_STOP_LOSS_PCT) + 1e-9:
-                    reason = (
-                        f"stop_loss cur={cur:.3f} ≤ entry={entry:.3f}"
-                        f"×{1-COPY_STOP_LOSS_PCT:.2f}"
-                    )
-                    stats["stop_losses"] += 1
-            if not reason and COPY_FOLLOW_RN1_EXIT:
-                if c["hold_key"] not in rn1_held:
-                    reason = "rn1_exited"
-                    stats["rn1_follows_exit"] += 1
-            if not reason:
-                continue
+            hold_key = c["hold_key"]
+            # Redeemable always attempted (don't wait for SL / RN1 flat).
+            if c.get("redeemable"):
+                reason = "redeemable"
+            else:
+                cool_until = self._exit_fail_until.get(hold_key) or 0
+                if cool_until > now_ts:
+                    rejects["exit_cooldown"] += 1
+                    continue
+                reason = ""
+                entry = c["entry"]
+                cur = c["cur"]
+                if entry > 0 and cur > 0 and COPY_STOP_LOSS_PCT > 0:
+                    if cur <= entry * (1.0 - COPY_STOP_LOSS_PCT) + 1e-9:
+                        reason = (
+                            f"stop_loss cur={cur:.3f} ≤ entry={entry:.3f}"
+                            f"×{1-COPY_STOP_LOSS_PCT:.2f}"
+                        )
+                        stats["stop_losses"] += 1
+                if not reason and COPY_FOLLOW_RN1_EXIT:
+                    if hold_key not in rn1_held:
+                        reason = "rn1_exited"
+                        stats["rn1_follows_exit"] += 1
+                if not reason:
+                    continue
 
             ok = await self._sell_one(
                 condition_id=c["condition_id"],
                 side=c["side"],
                 shares=c["shares"],
-                entry_price=entry,
-                mark_price=cur if cur > 0 else entry,
+                entry_price=c["entry"],
+                mark_price=c["cur"] if c["cur"] > 0 else c["entry"],
                 title=c["title"],
                 neg_risk=c["neg_risk"],
+                redeemable=bool(c.get("redeemable")),
                 reason=reason,
                 stats=stats,
                 rejects=rejects,
             )
             if ok:
                 stats["exits"] += 1
+                self._exit_fail_until.pop(hold_key, None)
 
     async def _sell_one(
         self,
@@ -645,11 +691,53 @@ class Rn1SportsMaker:
         mark_price: float,
         title: str,
         neg_risk: bool,
+        redeemable: bool,
         reason: str,
         stats: Dict[str, Any],
         rejects: Counter,
     ) -> bool:
+        hold_key = f"{condition_id.lower()}:{side}"
         exit_px = mark_price if mark_price > 0 else max(0.01, entry_price * 0.5)
+
+        # Resolved markets: redeem instead of spamming sells into a dead book.
+        if redeemable or reason == "redeemable":
+            print(
+                f"  EXIT[redeem] {side.upper()} x{shares} "
+                f"(entry ${entry_price:.2f}) | {title[:55]}",
+                flush=True,
+            )
+            if self.dry_run:
+                self._pnl.mark_closed(
+                    condition_id, side,
+                    exit_price=1.0 if exit_px >= 0.95 else 0.0,
+                    shares=shares, reason="redeem",
+                )
+                return True
+            if not hasattr(self.client, "redeem_condition"):
+                rejects["exit_error"] += 1
+                print(f"  EXIT FAIL {condition_id[:12]}: redeem_condition unavailable", flush=True)
+                return False
+            try:
+                await self.client.redeem_condition(condition_id, neg_risk=neg_risk)
+                # Winning redeem ≈ $1/share; losing ≈ $0. Use mark when known.
+                redeem_px = 1.0 if exit_px >= 0.95 else (exit_px if exit_px > 0 else 0.0)
+                self._pnl.mark_closed(
+                    condition_id, side,
+                    exit_price=redeem_px, shares=shares, reason="redeem",
+                )
+                notify_sports_exit(
+                    title=title, side=side, shares=shares,
+                    entry_price=entry_price, exit_price=redeem_px,
+                    reason="redeem", live=True, condition_id=condition_id,
+                )
+                return True
+            except Exception as exc:
+                stats["errors"] += 1
+                rejects["exit_error"] += 1
+                self._exit_fail_until[hold_key] = time.time() + COPY_EXIT_FAIL_COOLDOWN_S
+                print(f"  EXIT FAIL {condition_id[:12]}: redeem {exc}", flush=True)
+                return False
+
         print(
             f"  EXIT[{reason}] SELL {side.upper()} x{shares} @ ~${exit_px:.2f} "
             f"(entry ${entry_price:.2f}) | {title[:55]}",
@@ -689,6 +777,46 @@ class Rn1SportsMaker:
             )
             return True
         except Exception as exc:
+            err_l = str(exc).lower()
+            # Dead book → try redeem once instead of limit-spam.
+            if any(
+                s in err_l
+                for s in ("no orderbook", "invalid token", "404", "does not exist")
+            ):
+                if hasattr(self.client, "redeem_condition"):
+                    try:
+                        print(
+                            f"  EXIT fallback redeem {condition_id[:12]}… "
+                            f"(no orderbook)",
+                            flush=True,
+                        )
+                        await self.client.redeem_condition(
+                            condition_id, neg_risk=neg_risk,
+                        )
+                        redeem_px = 0.0
+                        self._pnl.mark_closed(
+                            condition_id, side,
+                            exit_price=redeem_px, shares=shares,
+                            reason=f"{reason}+redeem",
+                        )
+                        notify_sports_exit(
+                            title=title, side=side, shares=shares,
+                            entry_price=entry_price, exit_price=redeem_px,
+                            reason=f"{reason}+redeem", live=True,
+                            condition_id=condition_id,
+                        )
+                        return True
+                    except Exception as exc_r:
+                        stats["errors"] += 1
+                        rejects["exit_error"] += 1
+                        self._exit_fail_until[hold_key] = (
+                            time.time() + COPY_EXIT_FAIL_COOLDOWN_S
+                        )
+                        print(
+                            f"  EXIT FAIL {condition_id[:12]}: {exc} / redeem {exc_r}",
+                            flush=True,
+                        )
+                        return False
             # Fallback: limit sell at mark (or 1¢ floor).
             try:
                 price_cents = max(1, min(99, int(round(exit_px * 100))))
@@ -718,6 +846,7 @@ class Rn1SportsMaker:
             except Exception as exc2:
                 stats["errors"] += 1
                 rejects["exit_error"] += 1
+                self._exit_fail_until[hold_key] = time.time() + COPY_EXIT_FAIL_COOLDOWN_S
                 print(f"  EXIT FAIL {condition_id[:12]}: {exc} / {exc2}", flush=True)
                 return False
 

@@ -9,11 +9,14 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from src.strategies.sports.config import (
+    COPY_ALLOW_TENNIS,
     COPY_MAX_USDC,
+    COPY_TENNIS_INCLUDE_DOUBLES,
+    COPY_TENNIS_INCLUDE_ITF,
     RN1_LOOKBACK_HOURS,
     RN1_PROXY_WALLET,
 )
-from src.strategies.sports.soccer_filter import is_soccer_market
+from src.strategies.sports.soccer_filter import is_copyable_market, is_soccer_market, is_tennis_market
 
 DEFAULT_DATA_HOST = "https://data-api.polymarket.com"
 MAX_TRADE_PAGES = 5
@@ -52,6 +55,27 @@ class Rn1Trade:
     def is_soccer(self) -> bool:
         return is_soccer_market(self.title, self.slug, self.event_slug)
 
+    @property
+    def is_tennis(self) -> bool:
+        return is_tennis_market(
+            self.title,
+            self.slug,
+            self.event_slug,
+            include_itf=COPY_TENNIS_INCLUDE_ITF,
+            include_doubles=COPY_TENNIS_INCLUDE_DOUBLES,
+        )
+
+    @property
+    def is_copyable(self) -> bool:
+        return is_copyable_market(
+            self.title,
+            self.slug,
+            self.event_slug,
+            allow_tennis=COPY_ALLOW_TENNIS,
+            include_itf=COPY_TENNIS_INCLUDE_ITF,
+            include_doubles=COPY_TENNIS_INCLUDE_DOUBLES,
+        )
+
 
 @dataclass(frozen=True)
 class Rn1Position:
@@ -74,6 +98,27 @@ class Rn1Position:
     @property
     def is_soccer(self) -> bool:
         return is_soccer_market(self.title, self.slug, self.event_slug)
+
+    @property
+    def is_tennis(self) -> bool:
+        return is_tennis_market(
+            self.title,
+            self.slug,
+            self.event_slug,
+            include_itf=COPY_TENNIS_INCLUDE_ITF,
+            include_doubles=COPY_TENNIS_INCLUDE_DOUBLES,
+        )
+
+    @property
+    def is_copyable(self) -> bool:
+        return is_copyable_market(
+            self.title,
+            self.slug,
+            self.event_slug,
+            allow_tennis=COPY_ALLOW_TENNIS,
+            include_itf=COPY_TENNIS_INCLUDE_ITF,
+            include_doubles=COPY_TENNIS_INCLUDE_DOUBLES,
+        )
 
     @property
     def copy_price(self) -> float:
@@ -269,8 +314,8 @@ class RN1WalletTracker:
         self._fetched_at = now
         return len(trades)
 
-    async def fetch_open_soccer_positions(self) -> List[Rn1Position]:
-        """Live (non-redeemable) soccer positions still priced in (0, 0.99)."""
+    async def fetch_open_copyable_positions(self) -> List[Rn1Position]:
+        """Live (non-redeemable) soccer/tennis positions still priced in (0, 0.99)."""
         out: List[Rn1Position] = []
         async with httpx.AsyncClient(timeout=30.0) as http:
             resp = await http.get(
@@ -288,10 +333,14 @@ class RN1WalletTracker:
             return out
         for row in rows:
             pos = _parse_position(row)
-            if not pos or not pos.is_soccer:
+            if not pos or not pos.is_copyable:
                 continue
             if pos.cur_price <= 0 or pos.cur_price >= 0.99:
                 continue
             out.append(pos)
         out.sort(key=lambda p: -p.size)
         return out
+
+    async def fetch_open_soccer_positions(self) -> List[Rn1Position]:
+        """Alias: open positions eligible for copy (soccer + optional tennis)."""
+        return await self.fetch_open_copyable_positions()

@@ -14,6 +14,10 @@ data/daily_entries_btc15m.json
 data/scan_stats_sports.json
 data/daily_entries_sports.json
 data/sports_pnl.json
+data/sports_pnl_archive_*.json
+data/sports_pnl_raw_before_correction.json
+data/sports_pnl_accident_*.json
+data/sports_pnl_guard_clear_*.json
 data/sports_discord_state.json
 data/ops_alerts.json
 data/ops_discord_state.json

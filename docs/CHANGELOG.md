@@ -9,7 +9,48 @@ PnL 数字仍记在 [NET_PNL.md](NET_PNL.md)。**阶段计划与决策门**见 [
 
 ---
 
-## 2026-08-27 — 跟 RN1 平仓 + 自动止损（止盈手动）
+## 2026-08-30 — 复盘文档 + 足球/网球价带跟单
+
+**目的：** 固化「套利为何低效 / RN1 跟什么 / 事故与 Guard」结论；代码与默认参数对齐。
+
+- 新文档：[RN1_WEEK_REVIEW_2026-08-30.md](RN1_WEEK_REVIEW_2026-08-30.md)；ROADMAP P6 / NET_PNL 同步
+- 跟单：`is_copyable` = 足球 ∪ ATP/WTA；价带默认 **[0.35, 0.75]**；**sync open=OFF**；lookback 密封
+- 过滤：禁 Spread/CFB/`usc` 误匹配；EXIT redeemable → Relayer
+- 运维：可归档 settled 清日损 Guard（本地 `sports_pnl_guard_clear_*.json`，不入库）
+
+---
+
+## 2026-08-30 — 清日损 Guard，恢复体育跟入
+
+**目的：** 事故日损（≈−$11.87）挡新开；归档结算笔并重置日限。
+
+- 归档：`data/sports_pnl_guard_clear_2026-08-30.json`（含 settled + 当日 daily_entries；gitignore）
+- 活账本仅留 open；`daily_entries_sports` 清空 → 日限恢复
+- Guard 校验：`ok`（daily_realized=0）
+
+---
+
+## 2026-08-30 — 跟单扩网球 + 收紧入场价带
+
+**目的：** 按 RN1 一周现金流，优先跟足球赛果 + ATP/WTA；避开彩票尾与锁盘。
+
+- 白名单：`is_copyable` = 足球 ∪ ATP/WTA 单打（`SPORTS_RN1_ALLOW_TENNIS=true`；ITF/双打默认关）
+- 默认价带 **[0.35, 0.75]**（`SPORTS_RN1_COPY_PRICE_MIN/MAX`）
+- 仍禁止 Spread / CFB / 镜像存量仓
+
+---
+
+## 2026-08-30 — 校正体育账本 + 重置 Guard；停镜像存量仓
+
+**目的：** 假 lost（−$37.76）误触发熔断；恢复跟单并避免再踩坑。
+
+- 归档校正账本：`data/sports_pnl_archive_2026-08-27.json`（核实 SL/跟平/redeem ≈ **−$6.49**）
+- `sports_pnl` 新实验日起 **2026-08-30**；默认 **`SPORTS_RN1_SYNC_OPEN_POSITIONS=false`**
+- EXIT：`redeemable` / 无 orderbook → Relayer redeem；EXIT FAIL 冷却 30min
+- **事故：** 写空账本时旧进程仍开着 sync，又镜像一批；`usc` slug 误跟美式足球 USC。已 `cancel_all`、修过滤、进程启动密封 lookback（不回填）
+- 事故仓归档：`data/sports_pnl_accident_2026-08-30.json`
+
+---
 
 - 每轮先跑 exits：RN1 不再持有同侧 → 市价/限价卖出我们的跟单仓
 - 单仓止损默认 **−20%**（`SPORTS_RN1_STOP_LOSS_PCT`）；**无自动止盈**

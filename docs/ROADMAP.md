@@ -1,7 +1,7 @@
 # 整体开发计划（路线图）
 
-以当前实盘为准：**Conservative + 15m 均为 live**（Conservative focus 池 + 日限 2；15m ≤12/天）、NAV≈**$119**、**P0/P1 已完成**（2026-08-25 复盘）。  
-PnL 见 [NET_PNL.md](NET_PNL.md)；P1 书面结论见 [P1_REVIEW.md](P1_REVIEW.md)；改动见 [CHANGELOG.md](CHANGELOG.md)。
+以当前实盘为准：**Conservative + 15m + 体育 RN1 均为 live**（体育：足球+网球价带过滤、sync=OFF）、NAV≈**$105–110**、**P0/P1 已完成**。  
+深度复盘：[RN1_WEEK_REVIEW_2026-08-30.md](RN1_WEEK_REVIEW_2026-08-30.md)。PnL 见 [NET_PNL.md](NET_PNL.md)；P1 见 [P1_REVIEW.md](P1_REVIEW.md)；改动见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 
@@ -22,7 +22,7 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；P1 书面结论见 [P1_REVIEW.md](P1_REVIEW.m
 | **P1** | **8/25–8/26** | 复盘 + 定价/选池诊断 | **✅ 已完成** → [P1_REVIEW.md](P1_REVIEW.md) |
 | **P2** | **8/26 起** | Conservative 小改（选 B） | **✅ 核心项已完成**；2.2/2.3 按 P1 跳过 |
 | **P3** | 8/21 起 | BTC+ETH 15m Completeness | **✅ live 60s**（P1 曾建议 dry-run；**8/26 用户改回 live**） |
-| **P4** | **8/26 起** | RN1 跟单 | **🟡 live 60s**；单笔 ≤$1；**无 Odds API**；L2 排队 → [P4_L2_NEXT.md](P4_L2_NEXT.md) |
+| **P4** | **8/26 起** | RN1 跟单 | **🟡 live 60s**；足球+ATP/WTA；价带 [0.35,0.75]；**无 Odds**；**sync=OFF**；L2 排队 → [P4_L2_NEXT.md](P4_L2_NEXT.md) |
 | **P5** | 贯穿 | 工程债 / 运维 | **✅ 核心已完成**（告警/Discord/redeem/M3/M4）；见 [未完成清单](#未完成--待办) |
 | **P6** | **8/26 起** | 运营观察 + 待决决策 | **🟡 进行中** → [下一步规划](#下一步规划p6-运营观察期) |
 
@@ -208,7 +208,7 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；P1 书面结论见 [P1_REVIEW.md](P1_REVIEW.m
 | `polymarket-dashboard` | Streamlit :8501 | — |
 | `polymarket-btc15m` | **`--btc-15m-completeness --live`** | **60s** |
 | `polymarket-ops-alerts` | `ops_alerts.py --loop 120s` | **120s** |
-| `polymarket-sports-rn1` | **`--sports-rn1 --live`（RN1 跟单 ≤$1）** | **60s** |
+| `polymarket-sports-rn1` | **`--sports-rn1 --live`（足球+网球跟单 ≤$1）** | **60s** |
 
 ---
 
@@ -236,23 +236,20 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；P1 书面结论见 [P1_REVIEW.md](P1_REVIEW.m
 **原则：** 先运营、再决策、后开发。P0～P5 核心代码已齐；接下来 **2～4 周以跑数据为主**，不急于加功能。  
 **资金现实：** NAV ~$119 适合验证逻辑，不适合 P4 L2 或冲成交式降门槛。
 
-### 现状快照（2026-08-26）
+### 现状快照（2026-08-30 更新）
 
 | 袖套 | PM2 | 数据结论 |
 |---|---|---|
-| **Conservative** | live 240s | P0 观察窗 **0 笔** — 市况偏贵，等天气窗口，**正常** |
-| **15m Completeness** | live 60s | **2000 轮 0 成交**；combined≥0.98 占绝大多数 |
-| **体育 RN1 L1** | live 300s strict | 有 Pinnacle edge，**`rn1_no_confirm` 挡单**；90 天实验刚启，**0 笔结算** |
-| **P2.3 降门槛** | ops 每轮写入 | `near_miss=0` → **skipped**，**不改** live 门槛 |
-| **P4 L2** | — | NAV < $500 → **不写代码**（见 [P4_L2_NEXT.md](P4_L2_NEXT.md)） |
+| **Conservative** | live 240s | 市况仍偏贵；near-miss≈0；维持门槛 |
+| **15m Completeness** | live 60s | 长期几乎 0 成交；**建议改 dry-run**（待执行） |
+| **体育 RN1** | live 60s | **纯跟单**（无 Odds）；足球+ATP/WTA；价带 [0.35,0.75]；**sync=OFF**；lookback 密封 |
+| **P4 L2** | — | NAV &lt; $500 → **不写代码** |
 
-**运维告警：** `polymarket-bot` / `dashboard` 重启次数偏高 → 见下方「第三优先级」。
-
----
+**深度复盘（套利为何低效 / RN1 跟什么 / 事故链）：** [RN1_WEEK_REVIEW_2026-08-30.md](RN1_WEEK_REVIEW_2026-08-30.md)
 
 ### 第一优先级：运营观察（几乎不写代码）
 
-**目标：** 三条 live 袖套各自产出可复盘数据。
+**目标：** 体育在**干净过滤**下积累 7–14 天样本；Conservative 继续捡漏；减少无效 15m 消耗。
 
 **每周固定看：**
 
@@ -265,28 +262,21 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；P1 书面结论见 [P1_REVIEW.md](P1_REVIEW.m
 
 | 动作 | 决策 |
 |---|---|
-| **Conservative** | 维持 P1 **选项 A** — 不改 `MIN_EDGE` / 0.98；空仓 = 风控在工作 |
-| **体育 L1** | 跑满 **90 天实验**（起点 2026-08-26）；留意 Odds API 配额 |
-| **P2.3** | 仅当 `near_miss_count > 0` 才讨论降门槛；须 **人工确认** |
+| **Conservative** | 维持 P1 **选项 A** — 不改 `MIN_EDGE` / 0.98 |
+| **体育 L1** | 足球+网球价带过滤；**永不 sync open**；两周后复盘去留 |
+| **15m** | ⏳ **建议 dry-run / 停**（P1 选项 C） |
+| **P2.3** | 仅当 `near_miss_count > 0` 才讨论降门槛 |
 
 ---
 
-### 第二优先级：待决运营决策（建议本周定）
-
-体育 **strict** 下有 edge、无成交 — **预期行为**。三选一：
-
-| 选项 | 做法 | 适合若… |
-|---|---|---|
-| **A 保持 strict** | 不改 `.env` | 验证「Pinnacle + RN1 对齐」最严 hypothesis；接受长期 0 笔 |
-| **B 改 `event` 模式** | `RN1_CONFIRM_MODE=event` + PM2 重启 | L1 阶段**先积累样本**；接受更多噪声 |
-| **C 暂停体育 live** | `pm2 stop polymarket-sports-rn1` | 省 Odds API / 注意力留给 Conservative |
-
-**文档建议（非强制）：** 若 90 天内要判定体育路线是否值得 → **B** 跑 2～4 周并保留 strict 拒绝统计对照；若复制 RN1 最严逻辑 → **A**。
+### 第二优先级：待决运营决策
 
 | 项 | 状态 |
 |---|---|
-| 体育 RN1 模式 | ⏳ **待决**（A / B / C） |
-| 15m live vs dry-run | ⏳ **待议**（P1 书面推荐 C；当前仍为 live） |
+| 体育过滤后继续 vs 暂停 | ⏳ 跑满 **7–14 天**干净样本再定 |
+| 15m live vs dry-run | ⏳ **强烈建议 dry-run**（仍待用户确认执行） |
+
+体育模式已不再是 Odds `strict/event`；当前为 **钱包 BUY 跟单 + 白名单**。旧 A/B/C（strict）表作废。
 
 ---
 
@@ -296,16 +286,15 @@ PnL 见 [NET_PNL.md](NET_PNL.md)；P1 书面结论见 [P1_REVIEW.md](P1_REVIEW.m
 
 | # | 项 | 价值 | 触发条件 |
 |---|---|---|---|
-| 1 | **15m 改 dry-run** | 省 API、减 orphan 风险 | 继续 0 成交 + 用户接受 P1 选项 C |
+| 1 | **15m 改 dry-run** | 省 API、减 orphan 风险 | 用户确认 |
 | 2 | **查 PM2 重启根因** | 稳定性 | `ops_alerts` 持续 warning |
-| 3 | **P2.1 选池再优化** | 少打 `no_real_ask` | Conservative API 压力高 |
-| 4 | Dashboard 体育周报 | 自动汇总 strict 拒绝率 / Odds 配额 | 纯运营便利 |
+| 3 | Dashboard 体育周报 | 汇总 copyable 信号 / SL / redeem | 运营便利 |
 
 **明确不做（除非数据变）：**
 
-- 自动降 `MIN_EDGE`（P2.3 仍 skipped）
-- P4 L2 WebSocket / 双边 Maker 库存
-- 放宽 Completeness **0.98**
+- 自动降 `MIN_EDGE` / Completeness **0.98**
+- P4 L2 WebSocket / 双边 Maker 库存（NAV &lt; $500）
+- 镜像 RN1（或任意钱包）open book
 - 月榜 #1 式大单 event、AI 方向性（见 [STRATEGY_MODES_AND_LEARNING.md](STRATEGY_MODES_AND_LEARNING.md)）
 
 ---
