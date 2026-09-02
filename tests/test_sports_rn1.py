@@ -82,6 +82,11 @@ def test_is_tennis_atp_wta():
         "Counter-Strike: Leo vs Butterfly",
         slug="cs2-leo-btf",
     )
+    # Challenger venue title + atp- slug must not copy
+    assert not is_tennis_market(
+        "Manacor: Inaki Montes vs Mathys Erhard",
+        slug="atp-manacor-montes-erhard",
+    )
 
 
 def test_is_copyable_soccer_and_tennis():
@@ -162,3 +167,92 @@ def test_fresh_guard_allows_after_reset(tmp_path):
     allowed, reason, _ = check_trading_allowed(nav_cents=11097, pnl=pnl)
     assert allowed is True
     assert reason == "ok"
+
+
+def test_peak_dd_skipped_until_sample_ready(tmp_path):
+    """Tiny peak + few settles must not trip peak-DD (8/30 false halt)."""
+    from src.strategies.sports.sports_guard import check_trading_allowed
+    from src.strategies.sports.sports_pnl import SportsPnL
+    from src.strategies.capital_policy import trading_day
+
+    path = tmp_path / "sports_pnl.json"
+    pnl = SportsPnL(path)
+    pnl._save({
+        "experiment_start": trading_day(),
+        "entries": [
+            {
+                "condition_id": "0xa",
+                "side": "yes",
+                "status": "won",
+                "settled_pnl_cents": 245,
+                "cost_cents": 250,
+                "closed_ts": "2026-08-30T06:00:00+08:00",
+                "day": trading_day(),
+            },
+            {
+                "condition_id": "0xb",
+                "side": "yes",
+                "status": "lost",
+                "settled_pnl_cents": -50,
+                "cost_cents": 100,
+                "closed_ts": "2026-08-30T07:00:00+08:00",
+                "day": trading_day(),
+            },
+            {
+                "condition_id": "0xc",
+                "side": "yes",
+                "status": "lost",
+                "settled_pnl_cents": -102,
+                "cost_cents": 300,
+                "closed_ts": "2026-08-30T08:00:00+08:00",
+                "day": trading_day(),
+            },
+        ],
+    })
+    allowed, reason, meta = check_trading_allowed(nav_cents=10329, pnl=pnl)
+    assert meta.get("peak_dd_armed") is False
+    assert allowed is True
+    assert reason == "ok"
+
+
+def test_reconcile_ghost_opens(tmp_path):
+    from datetime import datetime, timedelta
+    from src.strategies.capital_policy import CN_TZ
+    from src.strategies.sports.sports_pnl import SportsPnL
+
+    path = tmp_path / "sports_pnl.json"
+    pnl = SportsPnL(path)
+    old = (datetime.now(CN_TZ) - timedelta(hours=48)).isoformat()
+    fresh = (datetime.now(CN_TZ) - timedelta(hours=1)).isoformat()
+    pnl._save({
+        "experiment_start": "2026-08-30",
+        "entries": [
+            {
+                "condition_id": "0xghost",
+                "side": "yes",
+                "status": "open",
+                "shares": 5,
+                "cost_cents": 210,
+                "mark_cents": 0,
+                "opened_ts": old,
+                "sport": "rn1_soccer_copy",
+            },
+            {
+                "condition_id": "0xfresh",
+                "side": "yes",
+                "status": "open",
+                "shares": 5,
+                "cost_cents": 200,
+                "mark_cents": 100,
+                "opened_ts": fresh,
+                "sport": "rn1_soccer_copy",
+            },
+        ],
+    })
+    closed = pnl.reconcile_ghost_opens([], max_age_hours=36)
+    assert len(closed) == 1
+    assert closed[0]["condition_id"] == "0xghost"
+    assert closed[0]["status"] == "lost"
+    still = [e for e in pnl._load()["entries"] if e["status"] == "open"]
+    assert len(still) == 1
+    assert still[0]["condition_id"] == "0xfresh"

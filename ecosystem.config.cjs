@@ -55,8 +55,8 @@ module.exports = {
       name: "polymarket-btc15m",
       cwd: "/www/polymarket-trading-bot",
       script: "/www/polymarket-trading-bot/.venv/bin/python",
-      // Live sleeve: ≤2% NAV/pair, ≤12/day (see btc_15m_completeness); interval 60s.
-      args: "cli.py run --btc-15m-completeness --live --loop --interval 60 --log-level INFO",
+      // Dry-run: Completeness almost never fills at ~$100 NAV (P1); save API.
+      args: "cli.py run --btc-15m-completeness --loop --interval 60 --log-level INFO",
       interpreter: "none",
       autorestart: true,
       max_restarts: 20,
@@ -94,8 +94,8 @@ module.exports = {
       name: "polymarket-sports-rn1",
       cwd: "/www/polymarket-trading-bot",
       script: "/www/polymarket-trading-bot/.venv/bin/python",
-      // P4 RN1 copy: mirror RN1 BUY, ≤$1 USDC/order, no Odds API.
-      args: "cli.py run --sports-rn1 --live --loop --interval 60 --log-level INFO",
+      // P4 RN1 copy: soccer+ATP/WTA title, 30s poll, ≤$1/order, no Odds API.
+      args: "cli.py run --sports-rn1 --live --loop --interval 30 --log-level INFO",
       interpreter: "none",
       autorestart: true,
       max_restarts: 20,

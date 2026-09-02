@@ -107,18 +107,19 @@
 
 | 项 | 状态 |
 |---|---|
-| PM2 `polymarket-sports-rn1` | live 60s；`soccer+tennis`；价带 [0.35,0.75] |
+| PM2 `polymarket-sports-rn1` | live **30s**；`soccer+tennis`；价带 [0.35,0.75] |
 | Sync open | **OFF** |
 | Lookback | 每进程启动密封，不回填 |
-| Guard | 清档后 `ok`；日限恢复 25 |
+| Guard | 清档后 `ok`；日限 **5**/天（样本期） |
 | Conservative / 15m | 仍 live；15m **长期 0 成交**（P1 曾建议 dry-run） |
+| 每日复盘 | `.venv/bin/python scripts/sports_daily_review.py`（`--append` 写入 jsonl） |
 
 ---
 
 ## 6. 建议的下一步（运营优先，少写代码）
 
 1. **15m**：改 dry-run 或停 PM2（省 API / 注意力）。  
-2. **体育**：过滤后干净跑 **7–14 天**；看合格信号数、SL 次数、redeem；两周仍净亏或几乎无信号 → **暂停**。  
+2. **体育**：过滤后干净跑 **7–14 天**（日限 5）；每天跑 `sports_daily_review.py`；看合格信号数、SL、redeem；两周仍净亏或几乎无信号 → **暂停**。  
 3. **Conservative**：保留捡天气窗口；不降门槛冲成交。  
 4. **不做**：L2 做市（NAV 不够）；再镜像任何人库存；为成交降 Completeness。
 

@@ -10,6 +10,8 @@ from src.strategies.sports.config import (
     SPORTS_EXPERIMENT_DAYS,
     SPORTS_MAX_DAILY_LOSS_PCT,
     SPORTS_MAX_DRAWDOWN_PCT,
+    SPORTS_PEAK_DD_MIN_PEAK_CENTS,
+    SPORTS_PEAK_DD_MIN_SETTLED,
 )
 from src.strategies.sports.sports_pnl import SportsPnL
 
@@ -68,7 +70,19 @@ def check_trading_allowed(
             meta,
         )
 
-    if peak > 0 and drawdown >= int(peak * SPORTS_MAX_DRAWDOWN_PCT):
+    settled_n = int(exp.get("settled") or 0)
+    meta["peak_dd_min_peak_cents"] = SPORTS_PEAK_DD_MIN_PEAK_CENTS
+    meta["peak_dd_min_settled"] = SPORTS_PEAK_DD_MIN_SETTLED
+    peak_dd_armed = (
+        peak >= SPORTS_PEAK_DD_MIN_PEAK_CENTS
+        and settled_n >= SPORTS_PEAK_DD_MIN_SETTLED
+    )
+    meta["peak_dd_armed"] = peak_dd_armed
+    if (
+        peak_dd_armed
+        and peak > 0
+        and drawdown >= int(peak * SPORTS_MAX_DRAWDOWN_PCT)
+    ):
         return (
             False,
             f"peak drawdown ${drawdown/100:.2f} from high-water ${peak/100:.2f}",

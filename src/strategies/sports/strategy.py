@@ -34,6 +34,7 @@ from src.strategies.sports.config import (
     RN1_LOOKBACK_HOURS,
     RN1_PROXY_WALLET,
     SPORTS_EXPERIMENT_DAYS,
+    SPORTS_GHOST_RECONCILE_HOURS,
 )
 from src.strategies.sports.rn1_tracker import (
     RN1WalletTracker,
@@ -191,6 +192,12 @@ class Rn1SportsMaker:
             pos_list = []
 
         settled_now = self._pnl.update_from_positions(pos_list)
+        ghost_now = self._pnl.reconcile_ghost_opens(
+            pos_list, max_age_hours=SPORTS_GHOST_RECONCILE_HOURS,
+        )
+        if ghost_now:
+            settled_now = list(settled_now) + list(ghost_now)
+            print(f"   Ghost reconcile: closed {len(ghost_now)} stale opens", flush=True)
         stats["settled"] = len(settled_now)
         for entry in settled_now:
             notify_sports_settlement(
@@ -257,6 +264,21 @@ class Rn1SportsMaker:
             stats["guard_halted"] = 1
             stats["guard_reason"] = guard_reason
             print(f"   ⛔ Guard halt (new entries blocked): {guard_reason}", flush=True)
+            # Still count unseen copyable signals for observability (do not mark seen).
+            try:
+                await self.rn1.refresh(force=True)
+                trades = self.rn1.trades
+                copyable = [t for t in trades if t.is_copyable]
+                unseen = [t for t in copyable if t.copy_key() not in self._seen]
+                stats["rn1_trades_cached"] = len(trades)
+                stats["copyable_trades"] = len(copyable)
+                stats["new_signals"] = len(unseen)
+                print(
+                    f"   (halted) copyable={len(copyable)} unseen_signals={len(unseen)}",
+                    flush=True,
+                )
+            except Exception as exc:
+                logger.warning("RN1 refresh during guard halt failed: %s", exc)
             if not self._halt_notified:
                 notify_sports_halt(guard_reason, guard_meta)
                 self._halt_notified = True

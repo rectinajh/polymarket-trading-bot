@@ -160,6 +160,69 @@ class SportsPnL:
             self._save(data)
         return updated
 
+    def reconcile_ghost_opens(
+        self,
+        positions: List[Dict[str, Any]],
+        *,
+        max_age_hours: float = 36.0,
+    ) -> List[Dict[str, Any]]:
+        """Close open ledger rows missing on-chain for longer than ``max_age_hours``.
+
+        Avoids false settles on brief API gaps; ghosts (expired / already gone)
+        otherwise block experiment clarity and exit logic.
+        """
+        present: set = set()
+        for p in positions or []:
+            if not isinstance(p, dict):
+                continue
+            cond = str(p.get("condition_id") or p.get("conditionId") or p.get("ticker") or "")
+            side = str(p.get("side") or "").lower()
+            if not cond or side not in ("yes", "no"):
+                continue
+            if float(p.get("size") or 0) <= 0:
+                continue
+            present.add(f"{cond.lower()}:{side}")
+
+        data = self._load()
+        closed: List[Dict[str, Any]] = []
+        now = _now_cn()
+        dirty = False
+        for entry in data.get("entries") or []:
+            if entry.get("status") != "open":
+                continue
+            cond = str(entry.get("condition_id") or "").lower()
+            side = str(entry.get("side") or "yes").lower()
+            key = f"{cond}:{side}"
+            if key in present:
+                continue
+            opened = entry.get("opened_ts") or ""
+            try:
+                dt = datetime.fromisoformat(str(opened))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=CN_TZ)
+                age_h = (now - dt.astimezone(CN_TZ)).total_seconds() / 3600.0
+            except ValueError:
+                age_h = max_age_hours + 1.0
+            if age_h < max_age_hours:
+                continue
+            cost = int(entry.get("cost_cents") or 0)
+            shares = int(entry.get("shares") or 0)
+            mark = int(entry.get("mark_cents") or 0)
+            # Prefer last mark; else treat as total loss (capital already left NAV).
+            proceeds = mark if mark > 0 else 0
+            exit_px = (proceeds / 100.0 / shares) if shares > 0 else 0.0
+            entry["settled_pnl_cents"] = proceeds - cost
+            entry["status"] = "won" if proceeds >= cost else "lost"
+            entry["exit_reason"] = f"ghost_reconcile age_h={age_h:.0f}"
+            entry["exit_price"] = round(exit_px, 4)
+            entry["closed_ts"] = now.isoformat()
+            entry["mark_cents"] = proceeds
+            closed.append(dict(entry))
+            dirty = True
+        if dirty:
+            self._save(data)
+        return closed
+
     def mark_closed(
         self,
         condition_id: str,

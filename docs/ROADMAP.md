@@ -206,9 +206,9 @@
 |---|---|---|
 | `polymarket-bot` | `--conservative --live` | **240s** |
 | `polymarket-dashboard` | Streamlit :8501 | — |
-| `polymarket-btc15m` | **`--btc-15m-completeness --live`** | **60s** |
+| `polymarket-btc15m` | **`--btc-15m-completeness` dry-run** | **60s** |
 | `polymarket-ops-alerts` | `ops_alerts.py --loop 120s` | **120s** |
-| `polymarket-sports-rn1` | **`--sports-rn1 --live`（足球+网球跟单 ≤$1）** | **60s** |
+| `polymarket-sports-rn1` | **`--sports-rn1 --live`（足球+网球跟单 ≤$1）** | **30s** |
 
 ---
 
@@ -241,8 +241,8 @@
 | 袖套 | PM2 | 数据结论 |
 |---|---|---|
 | **Conservative** | live 240s | 市况仍偏贵；near-miss≈0；维持门槛 |
-| **15m Completeness** | live 60s | 长期几乎 0 成交；**建议改 dry-run**（待执行） |
-| **体育 RN1** | live 60s | **纯跟单**（无 Odds）；足球+ATP/WTA；价带 [0.35,0.75]；**sync=OFF**；lookback 密封 |
+| **15m Completeness** | dry-run 60s | 长期几乎 0 成交；已改 dry-run 省 API |
+| **体育 RN1** | live **30s** | **纯跟单**；足球+ATP/WTA **title**；价带 [0.35,0.75]；**sync=OFF**；lookback 密封 |
 | **P4 L2** | — | NAV &lt; $500 → **不写代码** |
 
 **深度复盘（套利为何低效 / RN1 跟什么 / 事故链）：** [RN1_WEEK_REVIEW_2026-08-30.md](RN1_WEEK_REVIEW_2026-08-30.md)
@@ -257,14 +257,14 @@
 |---|---|
 | Conservative | `data/scan_stats.json` · Dashboard Overview |
 | 15m | `data/scan_stats_btc15m.json` · `btc15m_window_pnl.json` |
-| 体育 | `data/scan_stats_sports.json` · `data/sports_pnl.json` |
+| 体育 | `data/scan_stats_sports.json` · `data/sports_pnl.json` · `scripts/sports_daily_review.py` |
 | 全局 | `data/ops_alerts.json`（429、PM2 重启、NAV） |
 
 | 动作 | 决策 |
 |---|---|
 | **Conservative** | 维持 P1 **选项 A** — 不改 `MIN_EDGE` / 0.98 |
-| **体育 L1** | 足球+网球价带过滤；**永不 sync open**；两周后复盘去留 |
-| **15m** | ⏳ **建议 dry-run / 停**（P1 选项 C） |
+| **体育 L1** | 足球+网球价带过滤；日限 **5**；**永不 sync open**；每日跑 `sports_daily_review.py`；两周后复盘去留 |
+| **15m** | ✅ **dry-run**（P1 选项 C） |
 | **P2.3** | 仅当 `near_miss_count > 0` 才讨论降门槛 |
 
 ---

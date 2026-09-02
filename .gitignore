@@ -18,6 +18,7 @@ data/sports_pnl_archive_*.json
 data/sports_pnl_raw_before_correction.json
 data/sports_pnl_accident_*.json
 data/sports_pnl_guard_clear_*.json
+data/sports_daily_review.jsonl
 data/sports_discord_state.json
 data/ops_alerts.json
 data/ops_discord_state.json

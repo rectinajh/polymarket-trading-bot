@@ -9,6 +9,37 @@ PnL 数字仍记在 [NET_PNL.md](NET_PNL.md)。**阶段计划与决策门**见 [
 
 ---
 
+## 2026-09-02 — 体育 30s + 网球 title 收紧 + 15m dry-run
+
+**目的：** 少漏临场信号；拒 Challenger（仅 slug 带 atp）；15m 停 live 省 API。
+
+- PM2 `polymarket-sports-rn1`：**interval 30s**
+- 网球：title 须含 ATP/WTA（slug-only 不算）
+- PM2 `polymarket-btc15m`：去掉 `--live`（dry-run）
+- 另：Peak-DD 小样本豁免、幽灵仓 reconcile、`sports_daily_review.py`
+
+---
+
+## 2026-09-02 — Peak-DD 小样本误杀修复 + 幽灵仓 reconcile
+
+**目的：** 8/30 后 Guard 因峰值回撤误挡 3 天；账本幽灵 open 失真。
+
+- Peak-DD 仅当 `peak ≥ $10` 且 `settled ≥ 15`（`SPORTS_PEAK_DD_MIN_*`）
+- 链上缺失 &gt;36h 的 open → `reconcile_ghost_opens`
+- Guard halt 时仍统计 unseen copyable 信号（不写入 seen）
+
+---
+
+## 2026-08-30 — 日限 5 + 体育每日复盘脚本
+
+**目的：** 方向性样本期控仓；每天一行看清信号/成交/拒因/PnL。
+
+- 默认 / `.env`：`SPORTS_RN1_MAX_ENTRIES_PER_DAY=5`
+- 脚本：`scripts/sports_daily_review.py`（可 `--append` → `data/sports_daily_review.jsonl`）
+- 用法：`.venv/bin/python scripts/sports_daily_review.py`
+
+---
+
 ## 2026-08-30 — 复盘文档 + 足球/网球价带跟单
 
 **目的：** 固化「套利为何低效 / RN1 跟什么 / 事故与 Guard」结论；代码与默认参数对齐。

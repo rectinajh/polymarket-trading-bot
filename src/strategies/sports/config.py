@@ -19,7 +19,8 @@ COPY_MAX_USDC = float(os.getenv("SPORTS_RN1_COPY_MAX_USDC", str(COPY_MIN_NOTIONA
 COPY_HARD_MAX_USDC = float(os.getenv("SPORTS_RN1_COPY_HARD_MAX_USDC", "5.0"))
 
 # Max copy fills per Shanghai trading day (each ≤ COPY_MAX_USDC).
-MAX_ENTRIES_PER_DAY = int(os.getenv("SPORTS_RN1_MAX_ENTRIES_PER_DAY", "25"))
+# Sample window default 5 — keep directional risk small while validating edge.
+MAX_ENTRIES_PER_DAY = int(os.getenv("SPORTS_RN1_MAX_ENTRIES_PER_DAY", "5"))
 
 # Whitelist sports only (soccer + optional tennis). Legacy name kept.
 COPY_SOCCER_ONLY = (os.getenv("SPORTS_RN1_SOCCER_ONLY", "true").strip().lower()
@@ -82,6 +83,11 @@ RN1_PRICE_TOLERANCE_TICKS = int(os.getenv("RN1_PRICE_TOLERANCE_TICKS", "2"))
 SPORTS_EXPERIMENT_DAYS = int(os.getenv("SPORTS_EXPERIMENT_DAYS", "90"))
 SPORTS_MAX_DAILY_LOSS_PCT = float(os.getenv("SPORTS_MAX_DAILY_LOSS_PCT", "0.05"))
 SPORTS_MAX_DRAWDOWN_PCT = float(os.getenv("SPORTS_MAX_DRAWDOWN_PCT", "0.30"))
+# Peak-from-high-water DD only after enough sample (tiny peaks false-trigger).
+SPORTS_PEAK_DD_MIN_PEAK_CENTS = int(os.getenv("SPORTS_PEAK_DD_MIN_PEAK_CENTS", "1000"))
+SPORTS_PEAK_DD_MIN_SETTLED = int(os.getenv("SPORTS_PEAK_DD_MIN_SETTLED", "15"))
+# Close ledger opens missing on-chain longer than this (ghost / expired).
+SPORTS_GHOST_RECONCILE_HOURS = float(os.getenv("SPORTS_GHOST_RECONCILE_HOURS", "36"))
 
 # Deprecated Odds/Pinnacle knobs (kept so old .env does not break imports).
 FAVORITE_MIN = float(os.getenv("SPORTS_RN1_FAVORITE_MIN", "0.50"))

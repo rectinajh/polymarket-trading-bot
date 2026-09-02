@@ -117,7 +117,11 @@ def is_tennis_market(
     include_itf: bool = False,
     include_doubles: bool = False,
 ) -> bool:
-    """Return True for ATP/WTA (optional ITF) match markets safe to copy."""
+    """Return True for ATP/WTA (optional ITF) match markets safe to copy.
+
+    Default: require ``ATP``/``WTA`` in the **title** (not slug alone) so
+    Challenger events with ``atp-…`` slugs are not copied.
+    """
     title = str(title or "")
     slug = str(slug or "")
     event_slug = str(event_slug or "")
@@ -130,14 +134,17 @@ def is_tennis_market(
     if not include_doubles and TENNIS_DOUBLES_RE.search(blob):
         return False
 
-    has_tour = bool(
-        TENNIS_TOUR_RE.search(blob)
-        or TENNIS_SLUG_RE.search(slug)
-        or TENNIS_SLUG_RE.search(event_slug)
+    # Prefer explicit tour label in title (blocks "Manacor: …" + atp-slug).
+    has_tour_title = bool(TENNIS_TOUR_RE.search(title))
+    has_tour_slug = bool(
+        TENNIS_SLUG_RE.search(slug) or TENNIS_SLUG_RE.search(event_slug)
     )
     has_itf = bool(ITF_RE.search(blob))
-    if has_tour:
+    if has_tour_title:
         return True
+    # Slug-only ATP/WTA without title tour → reject (likely Challenger/ITF mis-tag).
+    if has_tour_slug and not has_tour_title:
+        return False
     if include_itf and has_itf:
         return True
     return False
