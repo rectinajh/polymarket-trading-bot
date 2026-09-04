@@ -108,10 +108,34 @@ def test_is_copyable_soccer_and_tennis():
 
 
 def test_default_price_band():
-    from src.strategies.sports.config import COPY_PRICE_MAX, COPY_PRICE_MIN
+    from src.strategies.sports.config import (
+        COPY_MW_PRICE_MAX,
+        COPY_MW_PRICE_MIN,
+        COPY_PRICE_MAX,
+        COPY_PRICE_MIN,
+        MAX_ENTRIES_PER_DAY,
+        SPORTS_GHOST_RECONCILE_HOURS,
+    )
 
     assert COPY_PRICE_MIN == 0.35
     assert COPY_PRICE_MAX == 0.75
+    assert COPY_MW_PRICE_MIN == 0.50
+    assert COPY_MW_PRICE_MAX == 0.70
+    assert MAX_ENTRIES_PER_DAY == 10
+    assert SPORTS_GHOST_RECONCILE_HOURS == 12.0
+
+
+def test_copy_priority_and_mw_band():
+    from src.strategies.sports.soccer_filter import (
+        copy_price_band_for_market,
+        copy_signal_priority,
+    )
+
+    assert copy_signal_priority("ATP Cincinnati: A vs B") == 0
+    assert copy_signal_priority("Foo vs Bar: O/U 2.5", slug="ita-foo-bar-ou25") == 1
+    assert copy_signal_priority("Will SC Freiburg win on 2026-08-27?") == 2
+    assert copy_price_band_for_market("Will SC Freiburg win on 2026-08-27?") == (0.50, 0.70)
+    assert copy_price_band_for_market("ATP Cincinnati: A vs B") == (0.35, 0.75)
 
 
 def test_side_from_outcome_index():
@@ -249,10 +273,37 @@ def test_reconcile_ghost_opens(tmp_path):
             },
         ],
     })
-    closed = pnl.reconcile_ghost_opens([], max_age_hours=36)
+    closed = pnl.reconcile_ghost_opens([], max_age_hours=36, flat_age_hours=36)
     assert len(closed) == 1
     assert closed[0]["condition_id"] == "0xghost"
     assert closed[0]["status"] == "lost"
     still = [e for e in pnl._load()["entries"] if e["status"] == "open"]
     assert len(still) == 1
     assert still[0]["condition_id"] == "0xfresh"
+
+
+def test_reconcile_flat_book_faster(tmp_path):
+    from datetime import datetime, timedelta
+    from src.strategies.capital_policy import CN_TZ
+    from src.strategies.sports.sports_pnl import SportsPnL
+
+    path = tmp_path / "sports_pnl.json"
+    pnl = SportsPnL(path)
+    mid = (datetime.now(CN_TZ) - timedelta(hours=8)).isoformat()
+    pnl._save({
+        "experiment_start": "2026-08-30",
+        "entries": [{
+            "condition_id": "0xflat",
+            "side": "yes",
+            "status": "open",
+            "shares": 5,
+            "cost_cents": 200,
+            "mark_cents": 0,
+            "opened_ts": mid,
+            "sport": "rn1_soccer_copy",
+        }],
+    })
+    # 8h old, flat book → closes at flat_age_hours=6
+    closed = pnl.reconcile_ghost_opens([], max_age_hours=12, flat_age_hours=6)
+    assert len(closed) == 1
+    assert "flat" in closed[0]["exit_reason"]

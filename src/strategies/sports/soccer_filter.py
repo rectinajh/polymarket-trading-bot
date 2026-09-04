@@ -150,6 +150,58 @@ def is_tennis_market(
     return False
 
 
+def is_soccer_match_winner(title: str = "") -> bool:
+    """True for Polymarket ``Will X win on YYYY-MM-DD?`` soccer markets."""
+    return bool(WIN_ON_RE.match(str(title or "").strip()))
+
+
+def is_soccer_prop_market(
+    title: str = "",
+    slug: str = "",
+    event_slug: str = "",
+) -> bool:
+    """Soccer O/U / BTTS / draw props (not match-winner Will-win)."""
+    if is_soccer_match_winner(title):
+        return False
+    if not is_soccer_market(title, slug, event_slug):
+        return False
+    return True
+
+
+def copy_signal_priority(
+    title: str = "",
+    slug: str = "",
+    event_slug: str = "",
+) -> int:
+    """Lower = higher priority when daily cap binds.
+
+    tennis (0) > soccer props (1) > Will-win (2) > other (3).
+    """
+    if is_tennis_market(title, slug, event_slug):
+        return 0
+    if is_soccer_match_winner(title):
+        return 2
+    if is_soccer_prop_market(title, slug, event_slug):
+        return 1
+    if is_soccer_market(title, slug, event_slug):
+        return 2
+    return 3
+
+
+def copy_price_band_for_market(
+    title: str = "",
+    *,
+    default_min: float = 0.35,
+    default_max: float = 0.75,
+    mw_min: float = 0.50,
+    mw_max: float = 0.70,
+) -> tuple[float, float]:
+    """Return (lo, hi) entry band; Will-win uses tighter MW band."""
+    if is_soccer_match_winner(title):
+        return mw_min, mw_max
+    return default_min, default_max
+
+
 def is_copyable_market(
     title: str = "",
     slug: str = "",

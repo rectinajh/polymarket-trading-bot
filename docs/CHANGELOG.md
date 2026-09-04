@@ -9,6 +9,17 @@ PnL 数字仍记在 [NET_PNL.md](NET_PNL.md)。**阶段计划与决策门**见 [
 
 ---
 
+## 2026-09-05 — 日限 10 + 信号优先级 + Will-win 价带 + 幽灵仓加速
+
+**目的：** 日限打满时优先网球；压低足球赛果亏面；账本幽灵更快对齐链上。
+
+- `SPORTS_RN1_MAX_ENTRIES_PER_DAY=10`
+- 排序：网球 &gt; soccer props &gt; Will-win
+- Will-win 价带 **[0.50, 0.70]**（`SPORTS_RN1_MW_PRICE_*`）；其余仍 [0.35, 0.75]
+- 幽灵仓：缺失 **12h**；全平仓时 **6h**（`SPORTS_GHOST_FLAT_HOURS`）
+
+---
+
 ## 2026-09-02 — 体育 30s + 网球 title 收紧 + 15m dry-run
 
 **目的：** 少漏临场信号；拒 Challenger（仅 slug 带 atp）；15m 停 live 省 API。

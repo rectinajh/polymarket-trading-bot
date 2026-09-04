@@ -164,12 +164,13 @@ class SportsPnL:
         self,
         positions: List[Dict[str, Any]],
         *,
-        max_age_hours: float = 36.0,
+        max_age_hours: float = 12.0,
+        flat_age_hours: float = 6.0,
     ) -> List[Dict[str, Any]]:
-        """Close open ledger rows missing on-chain for longer than ``max_age_hours``.
+        """Close open ledger rows missing on-chain longer than age thresholds.
 
-        Avoids false settles on brief API gaps; ghosts (expired / already gone)
-        otherwise block experiment clarity and exit logic.
+        - Normal: missing > ``max_age_hours``
+        - Flat book (no on-chain positions): missing > ``flat_age_hours``
         """
         present: set = set()
         for p in positions or []:
@@ -183,6 +184,7 @@ class SportsPnL:
                 continue
             present.add(f"{cond.lower()}:{side}")
 
+        flat_book = len(present) == 0
         data = self._load()
         closed: List[Dict[str, Any]] = []
         now = _now_cn()
@@ -203,17 +205,18 @@ class SportsPnL:
                 age_h = (now - dt.astimezone(CN_TZ)).total_seconds() / 3600.0
             except ValueError:
                 age_h = max_age_hours + 1.0
-            if age_h < max_age_hours:
+            threshold = flat_age_hours if flat_book else max_age_hours
+            if age_h < threshold:
                 continue
             cost = int(entry.get("cost_cents") or 0)
             shares = int(entry.get("shares") or 0)
             mark = int(entry.get("mark_cents") or 0)
-            # Prefer last mark; else treat as total loss (capital already left NAV).
             proceeds = mark if mark > 0 else 0
             exit_px = (proceeds / 100.0 / shares) if shares > 0 else 0.0
             entry["settled_pnl_cents"] = proceeds - cost
             entry["status"] = "won" if proceeds >= cost else "lost"
-            entry["exit_reason"] = f"ghost_reconcile age_h={age_h:.0f}"
+            tag = "flat" if flat_book else "missing"
+            entry["exit_reason"] = f"ghost_reconcile {tag} age_h={age_h:.0f}"
             entry["exit_price"] = round(exit_px, 4)
             entry["closed_ts"] = now.isoformat()
             entry["mark_cents"] = proceeds

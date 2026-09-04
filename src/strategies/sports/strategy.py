@@ -21,6 +21,8 @@ from src.strategies.sports.config import (
     COPY_MAX_USDC,
     COPY_MIN_NOTIONAL,
     COPY_MIN_SHARES,
+    COPY_MW_PRICE_MAX,
+    COPY_MW_PRICE_MIN,
     COPY_PRICE_MAX,
     COPY_PRICE_MIN,
     COPY_SIDES,
@@ -34,13 +36,19 @@ from src.strategies.sports.config import (
     RN1_LOOKBACK_HOURS,
     RN1_PROXY_WALLET,
     SPORTS_EXPERIMENT_DAYS,
+    SPORTS_GHOST_FLAT_HOURS,
     SPORTS_GHOST_RECONCILE_HOURS,
 )
 from src.strategies.sports.rn1_tracker import (
     RN1WalletTracker,
     copy_share_count,
 )
-from src.strategies.sports.soccer_filter import is_tennis_market, side_from_outcome_index
+from src.strategies.sports.soccer_filter import (
+    copy_price_band_for_market,
+    copy_signal_priority,
+    is_tennis_market,
+    side_from_outcome_index,
+)
 from src.strategies.sports.sports_alerts import (
     notify_sports_exit,
     notify_sports_halt,
@@ -165,7 +173,8 @@ class Rn1SportsMaker:
             flush=True,
         )
         print(
-            f"   Rules: {sports_mode} | price [{COPY_PRICE_MIN:.2f},{COPY_PRICE_MAX:.2f}] | "
+            f"   Rules: {sports_mode} | price [{COPY_PRICE_MIN:.2f},{COPY_PRICE_MAX:.2f}] "
+            f"MW[{COPY_MW_PRICE_MIN:.2f},{COPY_MW_PRICE_MAX:.2f}] | "
             f"CLOB min {COPY_MIN_SHARES}sh / "
             f"${COPY_MIN_NOTIONAL:.2f} | "
             f"SL {COPY_STOP_LOSS_PCT*100:.0f}% | "
@@ -193,7 +202,9 @@ class Rn1SportsMaker:
 
         settled_now = self._pnl.update_from_positions(pos_list)
         ghost_now = self._pnl.reconcile_ghost_opens(
-            pos_list, max_age_hours=SPORTS_GHOST_RECONCILE_HOURS,
+            pos_list,
+            max_age_hours=SPORTS_GHOST_RECONCILE_HOURS,
+            flat_age_hours=SPORTS_GHOST_FLAT_HOURS,
         )
         if ghost_now:
             settled_now = list(settled_now) + list(ghost_now)
@@ -386,7 +397,13 @@ class Rn1SportsMaker:
             if not t.is_copyable:
                 self._seen.add(t.copy_key())
 
-        unseen.sort(key=lambda t: t.timestamp)
+        # Priority: tennis > soccer props > Will-win; then older first.
+        unseen.sort(
+            key=lambda t: (
+                copy_signal_priority(t.title, t.slug, t.event_slug),
+                t.timestamp,
+            )
+        )
         stats["new_signals"] = len(unseen)
         print(f"   New copyable BUY signals: {len(unseen)}", flush=True)
 
@@ -461,7 +478,14 @@ class Rn1SportsMaker:
         hold_key = f"{condition_id.lower()}:{side}"
         entry_key = hold_key
 
-        if not (COPY_PRICE_MIN <= price <= COPY_PRICE_MAX):
+        lo, hi = copy_price_band_for_market(
+            title,
+            default_min=COPY_PRICE_MIN,
+            default_max=COPY_PRICE_MAX,
+            mw_min=COPY_MW_PRICE_MIN,
+            mw_max=COPY_MW_PRICE_MAX,
+        )
+        if not (lo <= price <= hi):
             rejects["price_band"] += 1
             self._seen.add(dedupe_key)
             return False, cash, remaining
