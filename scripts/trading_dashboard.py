@@ -49,6 +49,16 @@ from src.strategies.sports.config import (
     SPORTS_EXPERIMENT_DAYS,
 )
 from src.strategies.sports.sports_pnl import SportsPnL
+from src.strategies.eu5.config import (
+    DEFAULT_LEDGER as EU5_LEDGER_PATH,
+    DEFAULT_PNL_PATH as EU5_PNL_PATH,
+    DEFAULT_SCAN_LOG as EU5_STATS_PATH,
+    MAX_ENTRIES_PER_DAY as EU5_MAX_ENTRIES_PER_DAY,
+    MIN_EDGE as EU5_MIN_EDGE,
+    PRICE_MAX as EU5_PRICE_MAX,
+    PRICE_MIN as EU5_PRICE_MIN,
+    STAKE_USDC as EU5_STAKE_USDC,
+)
 from src.utils.ops_metrics import count_since
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -1742,6 +1752,159 @@ def render_sports_rn1_panel(project_root: Path) -> None:
 
 
 @st.cache_data(ttl=30)
+def _load_eu5_dashboard_data(stats_path: str, ledger_path: str, pnl_path: str) -> dict:
+    """Latest EU5 scan cycle + PnL snapshot."""
+    latest: dict = {}
+    try:
+        if Path(stats_path).exists():
+            raw = json.loads(Path(stats_path).read_text(encoding="utf-8"))
+            cycles = raw.get("cycles") if isinstance(raw, dict) else []
+            if cycles:
+                latest = cycles[-1] if isinstance(cycles[-1], dict) else {}
+    except (OSError, json.JSONDecodeError, TypeError):
+        latest = {}
+
+    entries = DailyEntryLog(path=Path(ledger_path), limit=EU5_MAX_ENTRIES_PER_DAY)
+    pnl = SportsPnL(Path(pnl_path))
+    today_pnl = pnl.summary_for_day()
+    exp = pnl.experiment_summary()
+    return {
+        "latest": latest,
+        "entries_used": EU5_MAX_ENTRIES_PER_DAY - entries.remaining(),
+        "entries_remaining": entries.remaining(),
+        "pnl_today": today_pnl,
+        "experiment": exp,
+        "recent_pnl": pnl.recent_entries(12),
+        "has_odds_key": bool(os.getenv("THE_ODDS_API_KEY")),
+    }
+
+
+def render_eu5_panel(project_root: Path) -> None:
+    """EU5 fair-value sleeve: Pinnacle ref vs PM top-5 leagues."""
+    stats_path = project_root / EU5_STATS_PATH
+    data = _load_eu5_dashboard_data(
+        str(stats_path),
+        str(project_root / EU5_LEDGER_PATH),
+        str(project_root / EU5_PNL_PATH),
+    )
+    latest = data["latest"] or {}
+    is_live = bool(latest.get("live"))
+    pnl_today = data.get("pnl_today") or {}
+    exp = data.get("experiment") or {}
+    has_key = data.get("has_odds_key")
+
+    st.subheader("⚽ EU5 五大联赛（公允价值）")
+    mode_label = "**live**" if is_live else ("dry-run" if latest else "等待首轮")
+    st.caption(
+        f"模式 {mode_label} · Pinnacle 公允 − edge ≥ **${EU5_MIN_EDGE:.2f}** · "
+        f"价带 {EU5_PRICE_MIN}–{EU5_PRICE_MAX} · 单笔 ~${EU5_STAKE_USDC:.2f} · "
+        f"日限 {EU5_MAX_ENTRIES_PER_DAY} · "
+        f"最近扫描 {_format_scan_ts(latest.get('ts'))}"
+    )
+
+    if not has_key:
+        st.warning(
+            "⚠️ **THE_ODDS_API_KEY 未配置** — 袖套空转不下单。"
+            "去 [the-odds-api.com](https://the-odds-api.com) 拿免费 key 填入 `.env` 后重启 `polymarket-eu5`。"
+        )
+    elif latest.get("guard_halted"):
+        reason = latest.get("guard_reason", "guard")
+        if "daily loss" in str(reason):
+            st.warning(
+                f"🛑 **今日日亏熔断**：{reason}。明日 00:00（上海）自动恢复。"
+            )
+        else:
+            st.error(f"⛔ 实验暂停：{reason}")
+    elif latest:
+        ref_n = latest.get("ref_events", 0)
+        src = latest.get("ref_source") or "—"
+        st.success(
+            f"✅ 正常运行 · 参考事件 **{ref_n}**（{src}）· "
+            f"日限 **{EU5_MAX_ENTRIES_PER_DAY}** · 止损共用体育 Guard（日亏 2%）"
+        )
+
+    if not latest:
+        st.info(
+            "尚无 EU5 扫描记录。启动 `polymarket-eu5` 后写入 "
+            f"`{EU5_STATS_PATH}`。"
+        )
+        st.markdown("---")
+        return
+
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    with c1:
+        st.metric("PM 市场", latest.get("markets", "—"))
+    with c2:
+        st.metric("匹配 Pinnacle", latest.get("matched", 0))
+    with c3:
+        st.metric("价值信号", latest.get("signals", 0))
+    with c4:
+        st.metric("今日下单", latest.get("placed", data.get("entries_used", 0)))
+    with c5:
+        st.metric(
+            "日限",
+            f"{data['entries_used']}/{EU5_MAX_ENTRIES_PER_DAY}",
+            delta=f"剩 {data['entries_remaining']}",
+        )
+    with c6:
+        st.metric("参考源", latest.get("ref_source") or "—")
+
+    p1, p2, p3 = st.columns(3)
+    with p1:
+        st.metric(
+            "今日已实现 PnL",
+            f"${int(pnl_today.get('realized_pnl_cents', 0))/100:+.2f}",
+        )
+    with p2:
+        st.metric(
+            "累计已实现",
+            f"${int(exp.get('realized_pnl_cents', 0))/100:+.2f}",
+        )
+    with p3:
+        st.metric("持仓中", int(exp.get("open") or 0))
+
+    with st.expander("最近一轮明细", expanded=False):
+        st.markdown(
+            f"- 市场 **{latest.get('markets', 0)}** · 匹配 **{latest.get('matched', 0)}** · "
+            f"盘口 **{latest.get('books', 0)}** · 信号 **{latest.get('signals', 0)}** · "
+            f"尝试 **{latest.get('attempted', 0)}** · placed **{latest.get('placed', 0)}**\n"
+            f"- 参考事件 **{latest.get('ref_events', 0)}**（{latest.get('ref_source', '—')}）· "
+            f"耗时 {_format_elapsed_s(latest.get('elapsed_s'))}s"
+        )
+        rej = _reject_rows(latest.get("rejects") or {}, limit=12)
+        if not rej.empty:
+            st.markdown("**拒绝原因（本轮）**")
+            st.dataframe(rej, hide_index=True, width="stretch")
+        sigs = latest.get("signals_detail") or []
+        if sigs:
+            st.markdown("**价值信号**")
+            st.dataframe(pd.DataFrame(sigs), hide_index=True, width="stretch")
+
+    recent_pnl = data.get("recent_pnl") or []
+    if recent_pnl:
+        with st.expander("PnL 台账（最近）", expanded=False):
+            rows = []
+            for e in recent_pnl:
+                rows.append({
+                    "球队": e.get("team"),
+                    "侧": e.get("side"),
+                    "状态": e.get("status"),
+                    "成本 ($)": int(e.get("cost_cents") or 0) / 100,
+                    "edge": e.get("edge"),
+                    "公允": e.get("fair_prob"),
+                    "PnL ($)": (
+                        int(e.get("settled_pnl_cents") or 0) / 100
+                        if e.get("settled_pnl_cents") is not None
+                        else None
+                    ),
+                    "日期": e.get("match_date"),
+                })
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+    st.markdown("---")
+
+
+@st.cache_data(ttl=30)
 def _load_btc15m_dashboard_data(stats_path: str, pnl_path: str) -> dict:
     stats: dict = {"cycles": []}
     sp = Path(stats_path)
@@ -2029,6 +2192,7 @@ def show_overview(performance_data, positions, system_health_data, open_orders=N
 
     render_ops_status_panel(PROJECT_ROOT)
     render_sports_rn1_panel(PROJECT_ROOT)
+    render_eu5_panel(PROJECT_ROOT)
     render_btc15m_panel(PROJECT_ROOT)
     render_conservative_scan_panel(PROJECT_ROOT)
 
