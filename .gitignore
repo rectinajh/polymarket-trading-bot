@@ -236,3 +236,9 @@ data/csl_explore_ledger.jsonl
 data/csl_explore_state.json
 data/csl_explore_discord_state.json
 data/scan_stats_csl_explore.json
+
+# EU5 sleeve runtime
+data/eu5_pnl.json
+data/daily_entries_eu5.json
+data/scan_stats_eu5.json
+data/eu5_reference.json

@@ -52,6 +52,28 @@ module.exports = {
       time: true,
     },
     {
+      name: "polymarket-eu5",
+      cwd: "/www/polymarket-trading-bot",
+      script: "/www/polymarket-trading-bot/.venv/bin/python",
+      // EU5 fair-value: Pinnacle ref vs PM top-5 leagues. Needs THE_ODDS_API_KEY;
+      // idles safely (no orders) until the key is set.
+      args: "cli.py run --eu5 --live --loop --interval 300 --log-level INFO",
+      interpreter: "none",
+      autorestart: true,
+      max_restarts: 20,
+      min_uptime: "10s",
+      restart_delay: 5000,
+      kill_timeout: 15000,
+      max_memory_restart: "500M",
+      env: {
+        PYTHONUNBUFFERED: "1",
+      },
+      out_file: "/www/polymarket-trading-bot/logs/pm2-eu5-out.log",
+      error_file: "/www/polymarket-trading-bot/logs/pm2-eu5-error.log",
+      merge_logs: true,
+      time: true,
+    },
+    {
       name: "polymarket-btc15m",
       cwd: "/www/polymarket-trading-bot",
       script: "/www/polymarket-trading-bot/.venv/bin/python",

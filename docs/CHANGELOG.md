@@ -7,6 +7,18 @@ PnL 数字仍记在 [NET_PNL.md](NET_PNL.md)。**阶段计划与决策门**见 [
 
 ---
 
+## 2026-09-19 — EU5 五大联赛公允价值袖套（新）
+
+**目的：** 替代「无参照跟单」思路——用 Pinnacle h2h 去水概率做公允价，PM 薄盘偏离 ≥4¢ 才下手。
+
+- 新包 `src/strategies/eu5/`：价值腿（YES/NO 双边）+ 参考缓存（8h TTL，免费档 500 次/月可控）
+- CLI：`python cli.py run --eu5 [--live] [--loop] [--interval 300]`
+- 独立账本 `data/eu5_pnl.json` / `daily_entries_eu5.json` / `scan_stats_eu5.json`；共享体育 Guard（日亏 2%）
+- PM2：`polymarket-eu5`（live，**但 `THE_ODDS_API_KEY` 未配置前空转不下单**）
+- 单测 `tests/test_eu5.py`（11 个）
+
+---
+
 ## 2026-09-19 — RN1 降速观察（日 cap 3 + 日亏限 2%）
 
 **背景：** RN1 跟单 20 天 159 笔 −$47.16，全细分负期望（O/U −$35.19 最差）。用户选择降速而非停跑。

@@ -87,6 +87,15 @@ def cmd_run(args: argparse.Namespace) -> None:
         )
         return
 
+    # --eu5: top-5 EU league fair-value sleeve (Pinnacle reference)
+    if getattr(args, "eu5", False):
+        _run_eu5(
+            live_mode=live_mode,
+            loop=getattr(args, "loop", False),
+            interval=getattr(args, "interval", 300),
+        )
+        return
+
     # --safe-compounder mode: edge-based NO-side only
     if safe_compounder:
         _run_safe_compounder(
@@ -470,6 +479,57 @@ def _run_csl_explore(
             asyncio.run(_run_once())
     except KeyboardInterrupt:
         print("\nCSL explore sleeve stopped by user.")
+
+
+def _run_eu5(
+    live_mode: bool = False,
+    loop: bool = False,
+    interval: int = 300,
+) -> None:
+    """EU5 fair-value sleeve: Pinnacle ref vs PM top-5 leagues (dry-run default)."""
+    from src.clients import build_polymarket_clients
+    from src.strategies.eu5 import Eu5FairValue
+
+    _apply_live_flags(live_mode)
+
+    print("⚽ EU5 FAIR-VALUE SLEEVE (EPL/La Liga/Serie A/Bundesliga/Ligue 1)")
+    print("   Independent ledger: data/eu5_pnl.json · daily_entries_eu5.json")
+    if not live_mode:
+        print("   DRY RUN — no real orders (pass --live to trade)")
+    else:
+        print("   ⚠️  LIVE: ~$2 per signal, ≤3/day, Guard shared with sports sleeve.")
+    if loop:
+        print(f"   Continuous — every {interval}s. Ctrl-C to stop.")
+
+    async def _run_once():
+        async with build_polymarket_clients() as (client, gamma):
+            strat = Eu5FairValue(client=client, gamma=gamma, dry_run=not live_mode)
+            return await strat.run()
+
+    async def _run_forever():
+        cycle = 0
+        async with build_polymarket_clients() as (client, gamma):
+            strat = Eu5FairValue(client=client, gamma=gamma, dry_run=not live_mode)
+            while True:
+                cycle += 1
+                print(
+                    f"\n──── EU5 Cycle {cycle} — "
+                    f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ────"
+                )
+                try:
+                    await strat.run()
+                except Exception as exc:
+                    print(f"Cycle {cycle} failed: {exc}. Continuing after {interval}s.")
+                print(f"\n⏳ Sleeping {interval}s...")
+                await asyncio.sleep(interval)
+
+    try:
+        if loop:
+            asyncio.run(_run_forever())
+        else:
+            asyncio.run(_run_once())
+    except KeyboardInterrupt:
+        print("\nEU5 sleeve stopped by user.")
 
 
 def cmd_dashboard(args: argparse.Namespace) -> None:
@@ -1116,6 +1176,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="csl_explore",
         help="CSL explore sleeve: fingerprint/time_lag/completeness/narrative/anti_whale",
+    )
+    strategy_group.add_argument(
+        "--eu5",
+        action="store_true",
+        dest="eu5",
+        help="EU5 fair-value sleeve: Pinnacle ref vs PM top-5 leagues (dry-run default)",
     )
     p_run.add_argument(
         "--loop",

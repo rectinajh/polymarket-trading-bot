@@ -993,6 +993,34 @@ def render_strategy_params() -> None:
     except Exception as exc:
         st.warning(f"sports config 读取失败: {exc}")
 
+    # --- EU5 fair value ---
+    try:
+        from src.strategies.eu5 import config as eu5
+
+        st.subheader("⚽ EU5 五大联赛公允价值 sleeve")
+        st.dataframe(
+            _param_rows([
+                ("联赛", "EPL · 西甲 · 意甲 · 德甲 · 法甲",
+                 "Pinnacle h2h 去水为公允价", ""),
+                ("MIN_EDGE", eu5.MIN_EDGE, "PM ask ≤ 公允 − edge 才买（YES/NO 双边）",
+                 "EU5_MIN_EDGE"),
+                ("价带", f"{eu5.PRICE_MIN} – {eu5.PRICE_MAX}",
+                 "避开彩票尾与锁单", "EU5_PRICE_MIN/MAX"),
+                ("STAKE_USDC", eu5.STAKE_USDC, "每信号目标名义（$）", "EU5_STAKE_USDC"),
+                ("HARD_MAX_USDC", eu5.HARD_MAX_USDC, "单笔硬顶（$）", "EU5_HARD_MAX_USDC"),
+                ("MAX_ENTRIES_PER_DAY", eu5.MAX_ENTRIES_PER_DAY, "每日上限",
+                 "EU5_MAX_ENTRIES_PER_DAY"),
+                ("REF_TTL_HOURS", eu5.REF_TTL_HOURS,
+                 "Pinnacle 参考缓存（免费档 500 次/月 ≈ 5 联赛 × 3/天）",
+                 "EU5_REF_TTL_HOURS"),
+                ("THE_ODDS_API_KEY", "已配置" if __import__("os").getenv("THE_ODDS_API_KEY") else "❌ 未配置（袖套空转，不下单）",
+                 "the-odds-api.com 免费 key", "THE_ODDS_API_KEY"),
+            ]),
+            hide_index=True, width="stretch",
+        )
+    except Exception as exc:
+        st.warning(f"eu5 config 读取失败: {exc}")
+
     # --- CSL Explore ---
     try:
         from src.strategies.csl_explore import config as csl

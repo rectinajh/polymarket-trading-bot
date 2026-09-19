@@ -121,7 +121,9 @@ def test_default_price_band():
     assert COPY_PRICE_MAX == 0.75
     assert COPY_MW_PRICE_MIN == 0.50
     assert COPY_MW_PRICE_MAX == 0.70
-    assert MAX_ENTRIES_PER_DAY == 10
+    # Env-overridable (2026-09-19 slow-down set it to 3 in .env).
+    import os
+    assert MAX_ENTRIES_PER_DAY == int(os.getenv("SPORTS_RN1_MAX_ENTRIES_PER_DAY", "10"))
     assert SPORTS_GHOST_RECONCILE_HOURS == 12.0
 
 
