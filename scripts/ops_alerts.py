@@ -173,8 +173,8 @@ def _check_rate_limits() -> List[Dict[str, Any]]:
             }
         )
     recent = events_since(1.0, kind="rate_limit")[-3:]
-    if recent:
-        alerts[-1]["detail"] = recent if alerts else None  # type: ignore[index]
+    if recent and alerts:
+        alerts[-1]["detail"] = recent
     return alerts
 
 
