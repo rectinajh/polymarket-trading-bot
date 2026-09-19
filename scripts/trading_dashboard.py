@@ -1496,7 +1496,7 @@ def render_ops_status_panel(project_root: Path) -> None:
         st.caption(
             f"P2.3 MIN_EDGE 实验：**{exp.get('status', '—')}** · "
             f"near-miss={exp.get('near_miss_count', 0)} · "
-            f"生产门槛仍 **$0.02**"
+            f"生产门槛 **${float(exp.get('production_min_edge') or 0.015):.3f}**"
         )
     st.markdown("---")
 
@@ -1603,7 +1603,20 @@ def render_sports_rn1_panel(project_root: Path) -> None:
         return
 
     if latest.get("guard_halted"):
-        st.error(f"⛔ 停损/实验暂停：{latest.get('guard_reason', 'guard')}")
+        reason = latest.get("guard_reason", "guard")
+        if "daily loss" in str(reason):
+            st.warning(
+                f"🛑 **今日日亏熔断**：{reason}。"
+                f"明日 00:00（上海）自动恢复，无需操作。"
+                f"当前日限 **{SPORTS_MAX_ENTRIES_PER_DAY}** 笔 · 日亏限 **2%** NAV。"
+            )
+        else:
+            st.error(f"⛔ 实验暂停（需人工检查）：{reason}")
+    else:
+        st.success(
+            f"✅ 正常运行 · 日限 **{SPORTS_MAX_ENTRIES_PER_DAY}** 笔 · "
+            f"日亏熔断 **2%** NAV · 止损 −20% · 止盈手动"
+        )
 
     if latest.get("bootstrapped"):
         st.info("本轮为 bootstrap：已把历史 RN1 成交标记为 seen，下一轮起才跟新单。")
