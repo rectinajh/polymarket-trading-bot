@@ -230,3 +230,9 @@ secrets.yaml
 *.pem
 *.key
 .env*
+
+# CSL explore runtime state
+data/csl_explore_ledger.jsonl
+data/csl_explore_state.json
+data/csl_explore_discord_state.json
+data/scan_stats_csl_explore.json

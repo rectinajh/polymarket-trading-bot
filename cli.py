@@ -49,6 +49,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     conservative = getattr(args, "conservative", False)
     btc_15m = getattr(args, "btc_15m_completeness", False)
     sports_rn1 = getattr(args, "sports_rn1", False)
+    csl_explore = getattr(args, "csl_explore", False)
 
     # --conservative: Safe Compounder + Completeness Arb (no AI directional)
     if conservative:
@@ -74,6 +75,15 @@ def cmd_run(args: argparse.Namespace) -> None:
             live_mode=live_mode,
             loop=getattr(args, "loop", False),
             interval=getattr(args, "interval", 60),
+        )
+        return
+
+    # --csl-explore: CSL multi-strategy exploration sleeve (dry-run default)
+    if csl_explore:
+        _run_csl_explore(
+            live_mode=live_mode,
+            loop=getattr(args, "loop", False),
+            interval=getattr(args, "interval", 120),
         )
         return
 
@@ -389,6 +399,77 @@ def _run_sports_rn1(
             asyncio.run(_run_once())
     except KeyboardInterrupt:
         print("\nSports RN1 sleeve stopped by user.")
+
+
+def _run_csl_explore(
+    live_mode: bool = False,
+    loop: bool = False,
+    interval: int = 120,
+) -> None:
+    """CSL multi-strategy exploration sleeve (isolated ledgers; dry-run default)."""
+    from src.clients import build_polymarket_clients
+    from src.strategies.csl_explore import CslExploreOrchestrator
+    from src.strategies.csl_explore.config import ENABLED_STRATS, WEEK_BUDGET_USDC
+
+    _apply_live_flags(live_mode)
+
+    print("🧪 CSL EXPLORE SLEEVE")
+    print("   Independent from RN1. See docs/CSL_EXPLORE_PLAN.md")
+    print(f"   Enabled: {', '.join(ENABLED_STRATS)}")
+    print(f"   Week budget ≤${WEEK_BUDGET_USDC:.2f} · min order ~$1.01 / match")
+    if not live_mode:
+        print("   DRY RUN — plans only (pass --live to trade)")
+    else:
+        print("   ⚠️  LIVE: min YES buys; deduped; week budget enforced.")
+    if loop:
+        print(f"   Continuous — every {interval}s. Ctrl-C to stop.")
+
+    async def _run_once():
+        async with build_polymarket_clients() as (client, gamma):
+            strat = CslExploreOrchestrator(
+                dry_run=not live_mode,
+                client=client,
+                gamma=gamma,
+            )
+            try:
+                return await strat.run()
+            finally:
+                await strat.close()
+
+    async def _run_forever():
+        cycle = 0
+        async with build_polymarket_clients() as (client, gamma):
+            strat = CslExploreOrchestrator(
+                dry_run=not live_mode,
+                client=client,
+                gamma=gamma,
+            )
+            try:
+                while True:
+                    cycle += 1
+                    print(
+                        f"\n──── CSL Explore Cycle {cycle} — "
+                        f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ────"
+                    )
+                    try:
+                        await strat.run()
+                    except Exception as exc:
+                        print(
+                            f"Cycle {cycle} failed: {exc}. "
+                            f"Continuing after {interval}s."
+                        )
+                    print(f"\n⏳ Sleeping {interval}s...")
+                    await asyncio.sleep(interval)
+            finally:
+                await strat.close()
+
+    try:
+        if loop:
+            asyncio.run(_run_forever())
+        else:
+            asyncio.run(_run_once())
+    except KeyboardInterrupt:
+        print("\nCSL explore sleeve stopped by user.")
 
 
 def cmd_dashboard(args: argparse.Namespace) -> None:
@@ -1030,10 +1111,16 @@ def build_parser() -> argparse.ArgumentParser:
         dest="sports_rn1",
         help="RN1 copy-trade sleeve: mirror RN1 BUY, ≤$1 USDC/order (dry-run default)",
     )
+    strategy_group.add_argument(
+        "--csl-explore",
+        action="store_true",
+        dest="csl_explore",
+        help="CSL explore sleeve: fingerprint/time_lag/completeness/narrative/anti_whale",
+    )
     p_run.add_argument(
         "--loop",
         action="store_true",
-        help="Re-run continuously (--conservative / --safe-compounder / --btc-15m / --sports-rn1)",
+        help="Re-run continuously (--conservative / --btc-15m / --sports-rn1 / --csl-explore)",
     )
     p_run.add_argument(
         "--interval",

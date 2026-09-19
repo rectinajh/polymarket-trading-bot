@@ -7,6 +7,31 @@ PnL 数字仍记在 [NET_PNL.md](NET_PNL.md)。**阶段计划与决策门**见 [
 
 ---
 
+## 2026-09-19 — 月度复盘：CSL 止损修复 + MIN_EDGE 降至 1.5¢
+
+**背景（8/21→9/19）：** NAV $119→$92.96。RN1 足球跟单 159 笔胜率 58% 但净亏 −$47.16（用户决定**继续跑**）；BTC/ETH 15m 一个月 0 机会（**保持 live**）；Conservative 0 成交 0 near-miss。
+
+**改动：**
+- CSL 止损卖出改 **market/FOK**（吃最优 bid，不再挂限价等成交）— `csl_explore/executor.py` `place_yes_sell(market=True)`
+- CSL 止损遇 `not enough balance`（钱包已无该 token）→ 直接关仓记账 + Discord，**不再每 30 分钟无限重试**
+- CLOB 下单遇 `invalid tick size` → 解析真实最小 tick、更新缓存、**自动重试一次**（`polymarket_client.place_order`）
+- Conservative `MIN_EDGE` 0.02 → **0.015**（`safe_compounder.py`；P2.3 实验口径同步）
+
+**未动：** RN1 继续、15m 继续 live、Conservative focus 池不变。
+
+---
+
+## 2026-09-05 — CSL Explore 袖套（五策略 dry-run）
+
+**目的：** 中超薄盘探索与 RN1 隔离；小仓验证结构假说。
+
+- 计划：[CSL_EXPLORE_PLAN.md](CSL_EXPLORE_PLAN.md)
+- 代码：`src/strategies/csl_explore/`
+- CLI：`cli.py run --csl-explore`（`--loop --interval 120`）
+- 策略：fingerprint · time_lag · completeness · narrative · anti_whale（可选 dog_basket）
+- 账本：`data/csl_explore_ledger.jsonl`（不写 `sports_pnl.json`）
+- Live 下单 = P2（本版只 plan）
+
 ---
 
 ## 2026-09-05 — 日限 10 + 信号优先级 + Will-win 价带 + 幽灵仓加速

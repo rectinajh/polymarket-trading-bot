@@ -243,6 +243,7 @@
 | **Conservative** | live 240s | 市况仍偏贵；near-miss≈0；维持门槛 |
 | **15m Completeness** | dry-run 60s | 长期几乎 0 成交；已改 dry-run 省 API |
 | **体育 RN1** | live **30s** | 日限 **10**；网球优先；Will-win [0.50,0.70]；props/网球 [0.35,0.75]；sync=OFF |
+| **CSL Explore** | dry-run | 五策略探索袖套（指纹/错位/完备/叙事/反砸盘）；见 [CSL_EXPLORE_PLAN.md](CSL_EXPLORE_PLAN.md) |
 | **P4 L2** | — | NAV &lt; $500 → **不写代码** |
 
 **深度复盘（套利为何低效 / RN1 跟什么 / 事故链）：** [RN1_WEEK_REVIEW_2026-08-30.md](RN1_WEEK_REVIEW_2026-08-30.md)

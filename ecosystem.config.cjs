@@ -111,5 +111,26 @@ module.exports = {
       merge_logs: true,
       time: true,
     },
+    {
+      name: "polymarket-csl-explore",
+      cwd: "/www/polymarket-trading-bot",
+      script: "/www/polymarket-trading-bot/.venv/bin/python",
+      // CSL explore weekend: min ~$1.01/match, week budget $8.08, deduped.
+      args: "cli.py run --csl-explore --live --loop --interval 120 --log-level INFO",
+      interpreter: "none",
+      autorestart: true,
+      max_restarts: 20,
+      min_uptime: "10s",
+      restart_delay: 5000,
+      kill_timeout: 15000,
+      max_memory_restart: "400M",
+      env: {
+        PYTHONUNBUFFERED: "1",
+      },
+      out_file: "/www/polymarket-trading-bot/logs/pm2-csl-explore-out.log",
+      error_file: "/www/polymarket-trading-bot/logs/pm2-csl-explore-error.log",
+      merge_logs: true,
+      time: true,
+    },
   ],
 };

@@ -26,6 +26,7 @@ materialised on first use, so importing this module never fails just because
 import asyncio
 import json
 import os
+import re
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -1183,6 +1184,42 @@ class PolymarketClient(TradingLoggerMixin):
         try:
             resp = await asyncio.to_thread(_send)
         except Exception as exc:
+            # Gamma sometimes reports a finer tick than the exchange enforces
+            # (e.g. cached 0.001 vs real 0.01). Parse the CLOB's minimum,
+            # fix our cached tick, snap the price, and retry exactly once.
+            msg = str(exc)
+            m = re.search(
+                r"invalid tick size.*minimum for the market is\s*([\d.]+)",
+                msg, re.IGNORECASE,
+            )
+            if m and token_meta is not None:
+                try:
+                    real_tick = float(m.group(1))
+                except ValueError:
+                    real_tick = 0.0
+                if real_tick > 0 and abs(real_tick - tick_size) > 1e-12:
+                    token_meta.tick_size = real_tick
+                    tick_size = real_tick
+                    order_options = PartialCreateOrderOptions(
+                        tick_size=_clob_tick_size(tick_size), neg_risk=neg_risk,
+                    )
+                    if price_dollars is not None:
+                        price_dollars = round(
+                            round(price_dollars / tick_size) * tick_size, 4,
+                        )
+                    try:
+                        resp = await asyncio.to_thread(_send)
+                    except Exception as exc2:
+                        raise _classify_order_error(exc2) from exc2
+                    return _normalize_order_response(
+                        resp,
+                        condition_id=ticker,
+                        token_id=token_id,
+                        side=side_l,
+                        action=action_l,
+                        count=count,
+                        client_order_id=client_order_id,
+                    )
             classified = _classify_order_error(exc)
             if isinstance(classified, GeoblockError):
                 self._geoblocked = True

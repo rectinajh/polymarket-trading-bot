@@ -13,7 +13,7 @@ from src.strategies.scan_stats import ScanStatsLog, DEFAULT_STATS_PATH
 CN_TZ = ZoneInfo("Asia/Shanghai")
 EXPERIMENT_PATH = Path("data") / "min_edge_experiment.json"
 THRESHOLDS = (0.010, 0.015, 0.020, 0.025, 0.030)
-PRODUCTION_MIN_EDGE = 0.02
+PRODUCTION_MIN_EDGE = 0.015  # lowered from 0.02 on 2026-09-19 (user decision)
 
 
 def _now_iso() -> str:
@@ -60,9 +60,7 @@ def evaluate_from_scan_stats(
     top = sorted(near_misses, key=lambda x: -float(x.get("edge") or 0))[:10]
 
     recommendation = "hold"
-    if _count_at(near_misses, 0.015) >= 3:
-        recommendation = "review_lower_to_1.5c"
-    elif _count_at(near_misses, 0.010) >= 5:
+    if _count_at(near_misses, 0.010) >= 3:
         recommendation = "review_lower_to_1c"
 
     return {
@@ -72,7 +70,7 @@ def evaluate_from_scan_stats(
         "passes_at_threshold": passes,
         "top_near_misses": top,
         "recommendation": recommendation,
-        "note": "Experiment only — production MIN_EDGE remains 0.02",
+        "note": "Experiment only — production MIN_EDGE is 0.015 (since 2026-09-19)",
     }
 
 

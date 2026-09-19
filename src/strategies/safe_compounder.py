@@ -71,7 +71,9 @@ MIN_VOLUME_WEATHER = 3000
 FOCUS_MAX_HOURS = 48.0
 MAX_ORDERBOOK_CHECKS = 80
 MIN_NO_ASK = 0.80
-MIN_EDGE = 0.02
+# 2026-09-19: lowered 0.02 → 0.015 after a month of 0 fills / 0 near-misses
+# (P2.3 experiment trigger). Still a last-vs-ask gap, not a time boost.
+MIN_EDGE = 0.015
 # Pre-filter before orderbook: need NO_ask <= (1 - YES_last) - MIN_EDGE and NO_ask >= MIN_NO_ASK.
 MAX_YES_LAST_FOR_EDGE = 1.0 - MIN_NO_ASK - MIN_EDGE  # 0.18
 # Sub-1% YES tails (politics/longshots): NO last ≈ 99¢+ with no 2¢ edge on books.

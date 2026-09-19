@@ -47,7 +47,7 @@ RN1 体育 L1 sleeve：**live**（8/26 起；strict 确认下成交样本待积�
 口径以 `2e16627` / `2ddaede` 为准；P1/P2 见 [CHANGELOG.md](CHANGELOG.md)、[ROADMAP.md](ROADMAP.md)、[P1_REVIEW.md](P1_REVIEW.md)。
 
 - **Completeness（套利）**：`1 - (YES_ask + NO_ask) ≥ 0.02` 且 combined **&lt; 0.98**；两腿 FOK。
-- **Safe Compounder（方向性 NO）**：`edge = (1 - YES_last) - NO_ask`，要求 `edge ≥ 0.02`、`NO_ask ≥ 0.80`、剩余时间 &gt; 3h；**focus 池**（2026-08-26 起）：天气或 ≤48h 到期。
+- **Safe Compounder（方向性 NO）**：`edge = (1 - YES_last) - NO_ask`，要求 `edge ≥ 0.015`（2026-09-19 起，原 0.02）、`NO_ask ≥ 0.80`、剩余时间 &gt; 3h；**focus 池**（2026-08-26 起）：天气或 ≤48h 到期。
 - **单笔份额**：`min(前两档 ask 深度的 25%, NAV 档位上限, 半 Kelly, 现金)`。
 - **NAV 档位**：&lt;$500 → 5%（当前 ~$6/笔）；&lt;$5k → 2%；&lt;$20k → 1%；否则 0.5%。
 - **每日新开仓**：最多 **2 笔**（两策略共用，2026-08-26 起；原 6 笔）；相关标题共用一个名额。无每日利润目标。
