@@ -845,6 +845,192 @@ def load_system_health():
             "realized_pnl": 0.0,
         }
 
+def _param_rows(rows: list[tuple]) -> pd.DataFrame:
+    """(name, value, note, env) → display DataFrame."""
+    return pd.DataFrame(
+        [
+            {"参数": n, "当前值": v, "说明": d, "环境变量": e or "—"}
+            for n, v, d, e in rows
+        ]
+    )
+
+
+def render_strategy_params() -> None:
+    """Live strategy parameters for every sleeve (read from code/env)."""
+    st.header("⚙️ 策略参数总览")
+    st.caption(
+        "直接读取各策略模块的当前常量（含 .env 覆盖）。改参数 = 改代码或环境变量后重启对应 PM2 进程。"
+    )
+
+    # --- 全局资金政策 ---
+    try:
+        from src.strategies import capital_policy as cp
+
+        st.subheader("🏦 全局资金政策（所有 sleeve 共用）")
+        st.dataframe(
+            _param_rows([
+                ("MAX_ENTRIES_PER_DAY", cp.MAX_ENTRIES_PER_DAY,
+                 "Conservative 每日新开仓上限（两策略共用）", ""),
+                ("DEPTH_TAKE_PCT", cp.DEPTH_TAKE_PCT,
+                 "单笔最多吃前两档 ask 深度的比例", ""),
+                ("DEPTH_LEVELS", cp.DEPTH_LEVELS, "深度采样档数", ""),
+                ("NAV 档位", "<$500→5% · <$5k→2% · <$20k→1% · 否则 0.5%",
+                 "单笔最大仓位占 NAV 比例（nav_max_position_pct）", ""),
+            ]),
+            hide_index=True, width="stretch",
+        )
+    except Exception as exc:
+        st.warning(f"capital_policy 读取失败: {exc}")
+
+    # --- Conservative: Safe Compounder ---
+    try:
+        from src.strategies import safe_compounder as sc
+
+        st.subheader("🛡️ Conservative — Safe Compounder（方向性 NO）")
+        st.dataframe(
+            _param_rows([
+                ("MIN_EDGE", sc.MIN_EDGE,
+                 "edge = (1−YES_last) − NO_ask 的最小值（2026-09-19 由 0.02 降至 0.015）", ""),
+                ("MIN_NO_ASK", sc.MIN_NO_ASK, "NO ask 下限（只做高概率）", ""),
+                ("MIN_YES_LAST", sc.MIN_YES_LAST, "YES last 下限（跳过 <1% 尾巴）", ""),
+                ("FOCUS_MAX_HOURS", sc.FOCUS_MAX_HOURS,
+                 "focus 池：天气 或 ≤该小时数到期", ""),
+                ("MIN_VOLUME", sc.MIN_VOLUME, "最小成交量（$）", ""),
+                ("MIN_VOLUME_WEATHER", sc.MIN_VOLUME_WEATHER, "天气类最小成交量（$）", ""),
+                ("MAX_POSITION_PCT", sc.MAX_POSITION_PCT,
+                 "单笔硬顶（实际取与 NAV 档位的较小值）", ""),
+                ("USE_KELLY", sc.USE_KELLY, "半 Kelly  sizing", ""),
+                ("MIN_CONFIDENCE", sc.MIN_CONFIDENCE, "置信度下限", ""),
+                ("MIN_ASK_SIZE", sc.MIN_ASK_SIZE, "ask 最小深度（份）", ""),
+                ("MAX_ORDERBOOK_CHECKS", sc.MAX_ORDERBOOK_CHECKS,
+                 "每轮最多查盘口数", ""),
+                ("MIN_HOURS_TO_ENTRY", sc.MIN_HOURS_TO_ENTRY,
+                 "距到期最小开仓时间（h，避免开了就被强平）", ""),
+            ]),
+            hide_index=True, width="stretch",
+        )
+    except Exception as exc:
+        st.warning(f"safe_compounder 读取失败: {exc}")
+
+    # --- Conservative: Completeness Arb ---
+    try:
+        from src.strategies import completeness_arb as ca
+
+        st.subheader("⚖️ Conservative — Completeness Arb（YES+NO < $1）")
+        st.dataframe(
+            _param_rows([
+                ("MAX_COMBINED_ASK", ca.MAX_COMBINED_ASK, "两腿 ask 之和上限", ""),
+                ("MIN_PROFIT_PER_SHARE", ca.MIN_PROFIT_PER_SHARE,
+                 "每份最小利润（1 − combined）", ""),
+                ("MIN_VOLUME", ca.MIN_VOLUME, "最小成交量（$）", ""),
+                ("MAX_NOTIONAL_PCT", ca.MAX_NOTIONAL_PCT, "名义本金占 NAV 额外上限", ""),
+                ("MIN_ASK_SIZE", ca.MIN_ASK_SIZE, "ask 最小深度（份）", ""),
+                ("MAX_MARKETS_TO_CHECK", ca.MAX_MARKETS_TO_CHECK,
+                 "每轮最多检查市场数", ""),
+            ]),
+            hide_index=True, width="stretch",
+        )
+    except Exception as exc:
+        st.warning(f"completeness_arb 读取失败: {exc}")
+
+    # --- BTC/ETH 15m ---
+    try:
+        from src.strategies.btc_15m_completeness import strategy as m15
+
+        st.subheader("⏱️ BTC/ETH 15m Completeness sleeve")
+        st.dataframe(
+            _param_rows([
+                ("资产", "BTC + ETH", "slug btc/eth-updown-15m-{unix}", ""),
+                ("MAX_COMBINED_ASK", m15.MAX_COMBINED_ASK, "Up+Down ask 之和上限", ""),
+                ("MIN_PROFIT_PER_SHARE", m15.MIN_PROFIT_PER_SHARE, "每份最小利润", ""),
+                ("MIN_ASK_SIZE", m15.MIN_ASK_SIZE, "ask 最小深度（份）", ""),
+                ("SLEEVE_CAP_PCT", m15.SLEEVE_CAP_PCT, "每笔占 NAV 上限", ""),
+                ("MAX_ENTRIES_PER_DAY", m15.MAX_ENTRIES_PER_DAY, "每日入场上限", ""),
+                ("MIN_SECONDS_LEFT", m15.MIN_SECONDS_LEFT,
+                 "窗口剩余不足则跳过（防结算竞争）", ""),
+            ]),
+            hide_index=True, width="stretch",
+        )
+    except Exception as exc:
+        st.warning(f"btc_15m 读取失败: {exc}")
+
+    # --- Sports RN1 ---
+    try:
+        from src.strategies.sports import config as sp
+
+        st.subheader("⚽ RN1 体育跟单 sleeve")
+        st.dataframe(
+            _param_rows([
+                ("COPY_MIN_SHARES", sp.COPY_MIN_SHARES, "CLOB 最小份数",
+                 "SPORTS_RN1_COPY_MIN_SHARES"),
+                ("COPY_MIN_NOTIONAL", sp.COPY_MIN_NOTIONAL, "最小名义本金（$）",
+                 "SPORTS_RN1_COPY_MIN_NOTIONAL"),
+                ("COPY_HARD_MAX_USDC", sp.COPY_HARD_MAX_USDC, "单笔硬顶（$）",
+                 "SPORTS_RN1_COPY_HARD_MAX_USDC"),
+                ("MAX_ENTRIES_PER_DAY", sp.MAX_ENTRIES_PER_DAY, "每日跟单上限",
+                 "SPORTS_RN1_MAX_ENTRIES_PER_DAY"),
+                ("COPY_PRICE_MIN/MAX", f"{sp.COPY_PRICE_MIN} – {sp.COPY_PRICE_MAX}",
+                 "跟单价带（避开彩票尾/锁单）", "SPORTS_RN1_COPY_PRICE_MIN/MAX"),
+                ("MW 价带", f"{sp.COPY_MW_PRICE_MIN} – {sp.COPY_MW_PRICE_MAX}",
+                 "Will-win 更紧价带", "SPORTS_RN1_MW_PRICE_MIN/MAX"),
+                ("COPY_STOP_LOSS_PCT", sp.COPY_STOP_LOSS_PCT,
+                 "单仓止损（mark ≤ entry×(1−pct)）；止盈手动", "SPORTS_RN1_STOP_LOSS_PCT"),
+                ("COPY_FOLLOW_RN1_EXIT", sp.COPY_FOLLOW_RN1_EXIT,
+                 "RN1 平仓则跟随卖出", "SPORTS_RN1_FOLLOW_EXIT"),
+                ("COPY_SYNC_OPEN_POSITIONS", sp.COPY_SYNC_OPEN_POSITIONS,
+                 "启动时同步 RN1 存量仓（默认关）", "SPORTS_RN1_SYNC_OPEN_POSITIONS"),
+                ("网球", f"ATP/WTA={sp.COPY_ALLOW_TENNIS} · ITF={sp.COPY_TENNIS_INCLUDE_ITF} · 双打={sp.COPY_TENNIS_INCLUDE_DOUBLES}",
+                 "白名单：足球 + 可选网球", "SPORTS_RN1_ALLOW_TENNIS 等"),
+                ("SPORTS_MAX_DAILY_LOSS_PCT", sp.SPORTS_MAX_DAILY_LOSS_PCT,
+                 "日亏 Guard（占实验本金）", "SPORTS_MAX_DAILY_LOSS_PCT"),
+                ("SPORTS_MAX_DRAWDOWN_PCT", sp.SPORTS_MAX_DRAWDOWN_PCT,
+                 "最大回撤 Guard", "SPORTS_MAX_DRAWDOWN_PCT"),
+                ("RN1_LOOKBACK_HOURS", sp.RN1_LOOKBACK_HOURS,
+                 "扫描 RN1 最近成交窗口", "RN1_LOOKBACK_HOURS"),
+            ]),
+            hide_index=True, width="stretch",
+        )
+    except Exception as exc:
+        st.warning(f"sports config 读取失败: {exc}")
+
+    # --- CSL Explore ---
+    try:
+        from src.strategies.csl_explore import config as csl
+
+        st.subheader("🧪 CSL 中超探索 sleeve")
+        st.dataframe(
+            _param_rows([
+                ("启用策略", ", ".join(csl.ENABLED_STRATS),
+                 "fingerprint/time_lag/completeness/narrative/anti_whale",
+                 "CSL_EXPLORE_ENABLED_STRATS"),
+                ("ORDER_USDC", csl.ORDER_USDC, "单笔名义（$）", "CSL_EXPLORE_ORDER_USDC"),
+                ("MIN_SHARES", csl.MIN_SHARES, "CLOB 最小份数", "CSL_EXPLORE_MIN_SHARES"),
+                ("WEEK_BUDGET_USDC", csl.WEEK_BUDGET_USDC, "每周预算（$）",
+                 "CSL_EXPLORE_WEEK_BUDGET_USDC"),
+                ("MAX_PER_MATCH_USDC", csl.MAX_PER_MATCH_USDC, "单场上限（$）",
+                 "CSL_EXPLORE_MAX_PER_MATCH_USDC"),
+                ("STOP_LOSS_PCT", csl.STOP_LOSS_PCT,
+                 "止损 −50%（FOK 市价卖，2026-09-19 修）；止盈手动",
+                 "CSL_EXPLORE_STOP_LOSS_PCT"),
+                ("EXIT_FAIL_COOLDOWN_S", csl.EXIT_FAIL_COOLDOWN_S,
+                 "止损失败重试间隔（s）", "CSL_EXPLORE_EXIT_FAIL_COOLDOWN_S"),
+                ("FINGERPRINT_SCORE", csl.FINGERPRINT_SCORE, "比分指纹目标",
+                 "CSL_EXPLORE_FINGERPRINT_SCORE"),
+                ("COMPLETENESS_MIN_GAP", csl.COMPLETENESS_MIN_GAP,
+                 "三路完备缺口下限", "CSL_EXPLORE_COMPLETENESS_MIN_GAP"),
+                ("TIME_LAG_DRAW_MINUTE", csl.TIME_LAG_DRAW_MINUTE,
+                 "0-0 到该分钟后看平", "CSL_EXPLORE_TIME_LAG_DRAW_MINUTE"),
+                ("ANTI_WHALE_DROP_PCT", csl.ANTI_WHALE_DROP_PCT,
+                 "mid 急跌触发反向买", "CSL_EXPLORE_ANTI_WHALE_DROP_PCT"),
+                ("NARRATIVE_FAVORITE_MIN", csl.NARRATIVE_FAVORITE_MIN,
+                 "热门判定阈值", "CSL_EXPLORE_NARRATIVE_FAVORITE_MIN"),
+            ]),
+            hide_index=True, width="stretch",
+        )
+    except Exception as exc:
+        st.warning(f"csl_explore config 读取失败: {exc}")
+
+
 def main():
     """Main dashboard function."""
 
@@ -869,6 +1055,7 @@ def main():
             "🎯 Strategy Performance",
             "🤖 LLM Analysis",
             "💼 Positions & Trades",
+            "⚙️ 策略参数",
             "⚠️ Risk Management",
             "🔧 System Health"
         ]
@@ -926,6 +1113,8 @@ def main():
         show_llm_analysis(llm_queries, llm_stats)
     elif page == "💼 Positions & Trades":
         show_positions_trades(positions, open_orders)
+    elif page == "⚙️ 策略参数":
+        render_strategy_params()
     elif page == "⚠️ Risk Management":
         show_risk_management(performance_data, positions, system_health_data['total_portfolio_value'])
     elif page == "🔧 System Health":
