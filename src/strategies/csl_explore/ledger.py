@@ -181,3 +181,93 @@ class ExploreLedger:
             st["opens"] = kept
             self.save_state(st)
         return closed_row
+
+    def pnl_summary(self) -> Dict[str, Any]:
+        """Realized PnL from ledger exits + open cost / mark MTM.
+
+        Realized = Σ (exit_price − entry_price) × shares for each ``exit`` row.
+        Unrealized uses latest mid in state when > 0; otherwise cost only.
+        """
+        fills_by_cid: Dict[str, Dict[str, Any]] = {}
+        exits: List[Dict[str, Any]] = []
+        if self.ledger_path.exists():
+            try:
+                for line in self.ledger_path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    kind = row.get("kind") or row.get("action")
+                    cid = str(row.get("condition_id") or "").lower()
+                    if not cid:
+                        continue
+                    if kind in ("fill", "buy_yes"):
+                        fills_by_cid[cid] = row
+                    elif kind == "exit":
+                        exits.append(row)
+            except (OSError, json.JSONDecodeError):
+                pass
+
+        realized = 0.0
+        won = lost = 0
+        exit_rows: List[Dict[str, Any]] = []
+        for x in exits:
+            cid = str(x.get("condition_id") or "").lower()
+            fill = fills_by_cid.get(cid) or {}
+            entry = float(
+                x.get("entry_price")
+                or fill.get("entry_price")
+                or fill.get("fill_price")
+                or fill.get("limit_price")
+                or 0
+            )
+            exit_px = float(x.get("exit_price") or 0)
+            shares = int(x.get("shares") or fill.get("shares") or 0)
+            pnl = (exit_px - entry) * shares if shares > 0 else 0.0
+            realized += pnl
+            if pnl > 1e-9:
+                won += 1
+            elif pnl < -1e-9:
+                lost += 1
+            exit_rows.append({
+                "strategy": x.get("strategy"),
+                "match_title": x.get("match_title") or x.get("question") or "",
+                "shares": shares,
+                "entry_price": entry,
+                "exit_price": exit_px,
+                "pnl_usdc": round(pnl, 4),
+                "reason": x.get("reason") or "",
+                "ts": x.get("ts"),
+            })
+
+        opens = self.open_positions()
+        open_cost = sum(float(o.get("cost_usdc") or 0) for o in opens)
+        mids = (self.load_state().get("mids") or {})
+        unrealized = 0.0
+        marked = 0
+        for o in opens:
+            cid = str(o.get("condition_id") or "").lower()
+            shares = int(o.get("shares") or 0)
+            entry = float(o.get("entry_price") or 0)
+            hist = mids.get(cid) or mids.get(o.get("condition_id") or "") or []
+            mark = 0.0
+            if isinstance(hist, list) and hist:
+                try:
+                    mark = float(hist[-1].get("p") or 0)
+                except (TypeError, ValueError, AttributeError):
+                    mark = 0.0
+            if mark > 0 and shares > 0 and entry > 0:
+                unrealized += (mark - entry) * shares
+                marked += 1
+
+        return {
+            "realized_usdc": round(realized, 2),
+            "unrealized_usdc": round(unrealized, 2),
+            "open_cost_usdc": round(open_cost, 2),
+            "won": won,
+            "lost": lost,
+            "exits_n": len(exits),
+            "opens_n": len(opens),
+            "marked_n": marked,
+            "exit_rows": exit_rows[-20:],
+            "net_closed_usdc": round(realized, 2),
+        }

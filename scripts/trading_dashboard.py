@@ -1915,7 +1915,9 @@ def render_eu5_panel(project_root: Path) -> None:
 
 @st.cache_data(ttl=30)
 def _load_csl_dashboard_data(stats_path: str, state_path: str, ledger_path: str) -> dict:
-    """Latest CSL explore scan + open positions + recent ledger rows."""
+    """Latest CSL explore scan + open positions + PnL + recent ledger rows."""
+    from src.strategies.csl_explore.ledger import ExploreLedger
+
     latest: dict = {}
     try:
         if Path(stats_path).exists():
@@ -1959,6 +1961,10 @@ def _load_csl_dashboard_data(stats_path: str, state_path: str, ledger_path: str)
     except OSError:
         pass
 
+    pnl = ExploreLedger(
+        ledger_path=Path(ledger_path), state_path=Path(state_path),
+    ).pnl_summary()
+
     return {
         "latest": latest,
         "spent_usdc": float(state.get("spent_usdc") or 0.0),
@@ -1966,6 +1972,7 @@ def _load_csl_dashboard_data(stats_path: str, state_path: str, ledger_path: str)
         "opens": opens,
         "closed_n": len(closed),
         "ledger_recent": list(reversed(ledger_rows[-20:])),
+        "pnl": pnl,
     }
 
 
@@ -1981,6 +1988,12 @@ def render_csl_explore_panel(project_root: Path) -> None:
     opens = data.get("opens") or []
     spent = float(data.get("spent_usdc") or 0.0)
     week_cap = float(CSL_WEEK_BUDGET)
+    pnl = data.get("pnl") or {}
+    realized = float(pnl.get("realized_usdc") or 0.0)
+    unrealized = float(pnl.get("unrealized_usdc") or 0.0)
+    open_cost = float(pnl.get("open_cost_usdc") or 0.0)
+    won = int(pnl.get("won") or 0)
+    lost = int(pnl.get("lost") or 0)
 
     st.subheader("🧪 中超 CSL 探索")
     mode_label = "**live**" if is_live else ("dry-run" if latest else "等待首轮")
@@ -1998,16 +2011,50 @@ def render_csl_explore_panel(project_root: Path) -> None:
         st.markdown("---")
         return
 
+    # --- Money first ---
+    money = st.columns(4)
+    with money[0]:
+        st.metric(
+            "💰 已实现盈亏",
+            f"${realized:+.2f}",
+            delta=f"{won}胜 / {lost}负 · {int(pnl.get('exits_n') or 0)} 笔平仓",
+        )
+    with money[1]:
+        st.metric(
+            "开仓成本",
+            f"${open_cost:.2f}",
+            delta=f"{len(opens)} 仓持仓中",
+        )
+    with money[2]:
+        mark_n = int(pnl.get("marked_n") or 0)
+        label = f"${unrealized:+.2f}" if mark_n else "—"
+        st.metric(
+            "浮盈（有标价）",
+            label,
+            delta=f"{mark_n}/{len(opens)} 有 mid" if opens else "无开仓",
+        )
+    with money[3]:
+        st.metric(
+            "周花费 / 预算",
+            f"${spent:.2f}",
+            delta=f"剩 ${max(0, week_cap - spent):.2f} / ${week_cap:.2f}",
+        )
+
     if is_live:
         if spent >= week_cap - 1e-9:
             st.warning(
                 f"🛑 **本周预算已用尽** ${spent:.2f} / ${week_cap:.2f} — 不再开新仓；"
-                f"仍管理止损 / 持仓。"
+                f"仍管理止损 / 持仓。已实现 **${realized:+.2f}**。"
+            )
+        elif realized >= 0:
+            st.success(
+                f"✅ 正常运行 · 已实现 **${realized:+.2f}** · "
+                f"开仓成本 ${open_cost:.2f} · 止盈手动"
             )
         else:
-            st.success(
-                f"✅ 正常运行 · 已花 **${spent:.2f}** / ${week_cap:.2f} · "
-                f"开仓 **{len(opens)}** · 止盈手动"
+            st.warning(
+                f"⚠️ 正常运行但已实现 **${realized:+.2f}** · "
+                f"开仓成本 ${open_cost:.2f} · 止盈手动"
             )
     else:
         st.info("当前 dry-run（无真实下单）")
@@ -2024,10 +2071,27 @@ def render_csl_explore_panel(project_root: Path) -> None:
     with c5:
         st.metric("开仓中", len(opens), delta=f"历史 closed {data.get('closed_n', 0)}")
     with c6:
-        st.metric("周花费", f"${spent:.2f}", delta=f"剩 ${max(0, week_cap - spent):.2f}")
+        st.metric("成交笔数", data.get("filled_keys", 0))
+
+    exit_rows = pnl.get("exit_rows") or []
+    if exit_rows:
+        with st.expander(f"已平仓盈亏明细（{len(exit_rows)}）", expanded=True):
+            rows = []
+            for e in reversed(exit_rows):
+                rows.append({
+                    "时间": _format_scan_ts(e.get("ts")),
+                    "策略": e.get("strategy"),
+                    "比赛": (e.get("match_title") or "")[:40],
+                    "份数": e.get("shares"),
+                    "入场": e.get("entry_price"),
+                    "出场": e.get("exit_price"),
+                    "盈亏 ($)": e.get("pnl_usdc"),
+                    "原因": (e.get("reason") or "")[:50],
+                })
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
     if opens:
-        with st.expander(f"开仓明细（{len(opens)}）", expanded=True):
+        with st.expander(f"开仓明细（{len(opens)}）", expanded=False):
             rows = []
             for o in opens:
                 rows.append({
@@ -2079,7 +2143,8 @@ def render_csl_explore_panel(project_root: Path) -> None:
             f"错误 **{latest.get('errors', 0)}**\n"
             f"- watches **{latest.get('watches', 0)}** · skips **{latest.get('skips', 0)}** · "
             f"本轮部署 **${float(latest.get('deployed_usdc') or 0):.2f}** · "
-            f"周花费 **${float(latest.get('week_spent') or spent):.2f}**"
+            f"周花费 **${float(latest.get('week_spent') or spent):.2f}** · "
+            f"已实现 **${realized:+.2f}**"
         )
 
     st.markdown("---")
