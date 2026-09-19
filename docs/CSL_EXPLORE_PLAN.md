@@ -25,7 +25,7 @@
 - [x] 单测：信号规则
 
 ### P1 — 可观测（下一迭代）
-- [ ] Dashboard 面板 / 日审脚本
+- [x] Dashboard 面板 / 日审脚本
 - [ ] 赛中比分源（可选 API 或手工 webhook）
 - [ ] 成交量冲击检测（CLOB trades 窗口）
 
@@ -34,9 +34,9 @@
 - [x] 去重 `filled_keys` + 周预算 / 单场帽
 - [x] PM2 `polymarket-csl-explore`（120s）
 - [x] Discord webhook（策略标签）
-- [x] 止损：标价相对入场 **−50%** 限价卖；**止盈手动**
-- [ ] 赛后结算进独立 PnL
-- [ ] Dashboard 面板
+- [x] 止损：标价相对入场 **−50%** FOK 市价卖（2026-09-19）；**止盈手动**
+- [ ] 赛后结算进独立 PnL（细化）
+- [x] Dashboard Overview 面板（2026-09-19）
 
 ## 风险壳
 

@@ -59,6 +59,15 @@ from src.strategies.eu5.config import (
     PRICE_MIN as EU5_PRICE_MIN,
     STAKE_USDC as EU5_STAKE_USDC,
 )
+from src.strategies.csl_explore.config import (
+    DEFAULT_LEDGER as CSL_LEDGER_PATH,
+    DEFAULT_SCAN_LOG as CSL_STATS_PATH,
+    DEFAULT_STATE as CSL_STATE_PATH,
+    ENABLED_STRATS as CSL_ENABLED_STRATS,
+    ORDER_USDC as CSL_ORDER_USDC,
+    STOP_LOSS_PCT as CSL_STOP_LOSS_PCT,
+    WEEK_BUDGET_USDC as CSL_WEEK_BUDGET,
+)
 from src.utils.ops_metrics import count_since
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -1905,6 +1914,178 @@ def render_eu5_panel(project_root: Path) -> None:
 
 
 @st.cache_data(ttl=30)
+def _load_csl_dashboard_data(stats_path: str, state_path: str, ledger_path: str) -> dict:
+    """Latest CSL explore scan + open positions + recent ledger rows."""
+    latest: dict = {}
+    try:
+        if Path(stats_path).exists():
+            raw = json.loads(Path(stats_path).read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                latest = raw.get("latest") or {}
+                if not latest:
+                    cycles = raw.get("cycles") or []
+                    if cycles and isinstance(cycles[-1], dict):
+                        latest = cycles[-1]
+    except (OSError, json.JSONDecodeError, TypeError):
+        latest = {}
+
+    state: dict = {}
+    try:
+        if Path(state_path).exists():
+            state = json.loads(Path(state_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        state = {}
+
+    opens = [
+        o for o in (state.get("opens") or [])
+        if isinstance(o, dict) and o.get("status") == "open"
+    ]
+    closed = [
+        o for o in (state.get("opens") or [])
+        if isinstance(o, dict) and o.get("status") == "closed"
+    ]
+
+    ledger_rows: list = []
+    try:
+        if Path(ledger_path).exists():
+            lines = Path(ledger_path).read_text(encoding="utf-8").strip().split("\n")
+            for line in lines[-40:]:
+                if not line.strip():
+                    continue
+                try:
+                    ledger_rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        pass
+
+    return {
+        "latest": latest,
+        "spent_usdc": float(state.get("spent_usdc") or 0.0),
+        "filled_keys": len(state.get("filled_keys") or []),
+        "opens": opens,
+        "closed_n": len(closed),
+        "ledger_recent": list(reversed(ledger_rows[-20:])),
+    }
+
+
+def render_csl_explore_panel(project_root: Path) -> None:
+    """CSL Chinese Super League exploration sleeve."""
+    data = _load_csl_dashboard_data(
+        str(project_root / CSL_STATS_PATH),
+        str(project_root / CSL_STATE_PATH),
+        str(project_root / CSL_LEDGER_PATH),
+    )
+    latest = data["latest"] or {}
+    is_live = latest.get("dry_run") is False
+    opens = data.get("opens") or []
+    spent = float(data.get("spent_usdc") or 0.0)
+    week_cap = float(CSL_WEEK_BUDGET)
+
+    st.subheader("🧪 中超 CSL 探索")
+    mode_label = "**live**" if is_live else ("dry-run" if latest else "等待首轮")
+    st.caption(
+        f"模式 {mode_label} · 策略 {', '.join(CSL_ENABLED_STRATS)} · "
+        f"单笔 ~${CSL_ORDER_USDC:.2f} · 周预算 ${week_cap:.2f} · "
+        f"止损 −{CSL_STOP_LOSS_PCT*100:.0f}%（FOK）· "
+        f"最近扫描 {_format_scan_ts(latest.get('ts'))}"
+    )
+
+    if not latest:
+        st.info(
+            f"尚无扫描记录。启动 `polymarket-csl-explore` 后写入 `{CSL_STATS_PATH}`。"
+        )
+        st.markdown("---")
+        return
+
+    if is_live:
+        if spent >= week_cap - 1e-9:
+            st.warning(
+                f"🛑 **本周预算已用尽** ${spent:.2f} / ${week_cap:.2f} — 不再开新仓；"
+                f"仍管理止损 / 持仓。"
+            )
+        else:
+            st.success(
+                f"✅ 正常运行 · 已花 **${spent:.2f}** / ${week_cap:.2f} · "
+                f"开仓 **{len(opens)}** · 止盈手动"
+            )
+    else:
+        st.info("当前 dry-run（无真实下单）")
+
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    with c1:
+        st.metric("比赛数", latest.get("matches", "—"))
+    with c2:
+        st.metric("信号", latest.get("signals_total", 0))
+    with c3:
+        st.metric("本轮下单", latest.get("placed", 0))
+    with c4:
+        st.metric("止损次数", latest.get("stop_losses", 0))
+    with c5:
+        st.metric("开仓中", len(opens), delta=f"历史 closed {data.get('closed_n', 0)}")
+    with c6:
+        st.metric("周花费", f"${spent:.2f}", delta=f"剩 ${max(0, week_cap - spent):.2f}")
+
+    if opens:
+        with st.expander(f"开仓明细（{len(opens)}）", expanded=True):
+            rows = []
+            for o in opens:
+                rows.append({
+                    "策略": o.get("strategy"),
+                    "比赛": (o.get("match_title") or "")[:40],
+                    "问题": (o.get("question") or "")[:50],
+                    "份数": o.get("shares"),
+                    "入场": o.get("entry_price"),
+                    "成本 ($)": round(float(o.get("cost_usdc") or 0), 2),
+                    "开仓时间": _format_scan_ts(o.get("opened_ts")),
+                })
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+    matches = latest.get("match_summaries") or []
+    if matches:
+        with st.expander("本轮比赛快照", expanded=False):
+            rows = []
+            for m in matches:
+                rows.append({
+                    "slug": m.get("slug"),
+                    "比赛": (m.get("title") or "")[:40],
+                    "主": m.get("home_px"),
+                    "平": m.get("draw_px"),
+                    "客": m.get("away_px"),
+                    "三路和": m.get("three_way_sum"),
+                    "成交量": round(float(m.get("volume") or 0), 0),
+                })
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+    ledger = data.get("ledger_recent") or []
+    if ledger:
+        with st.expander("账本最近事件", expanded=False):
+            rows = []
+            for e in ledger:
+                rows.append({
+                    "时间": _format_scan_ts(e.get("ts")),
+                    "策略": e.get("strategy"),
+                    "事件": e.get("kind") or e.get("action"),
+                    "比赛": (e.get("match_title") or e.get("question") or "")[:40],
+                    "价": e.get("exit_price") or e.get("entry_price") or e.get("price"),
+                    "备注": (e.get("reason") or e.get("error") or "")[:60],
+                })
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+    with st.expander("最近一轮明细", expanded=False):
+        st.markdown(
+            f"- 信号 **{latest.get('signals_total', 0)}** · 计划买 **{latest.get('buy_planned', 0)}** · "
+            f"placed **{latest.get('placed', 0)}** · SL **{latest.get('stop_losses', 0)}** · "
+            f"错误 **{latest.get('errors', 0)}**\n"
+            f"- watches **{latest.get('watches', 0)}** · skips **{latest.get('skips', 0)}** · "
+            f"本轮部署 **${float(latest.get('deployed_usdc') or 0):.2f}** · "
+            f"周花费 **${float(latest.get('week_spent') or spent):.2f}**"
+        )
+
+    st.markdown("---")
+
+
+@st.cache_data(ttl=30)
 def _load_btc15m_dashboard_data(stats_path: str, pnl_path: str) -> dict:
     stats: dict = {"cycles": []}
     sp = Path(stats_path)
@@ -2193,6 +2374,7 @@ def show_overview(performance_data, positions, system_health_data, open_orders=N
     render_ops_status_panel(PROJECT_ROOT)
     render_sports_rn1_panel(PROJECT_ROOT)
     render_eu5_panel(PROJECT_ROOT)
+    render_csl_explore_panel(PROJECT_ROOT)
     render_btc15m_panel(PROJECT_ROOT)
     render_conservative_scan_panel(PROJECT_ROOT)
 

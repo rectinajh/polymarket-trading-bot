@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set
 
+from src.strategies.capital_policy import CN_TZ
 from src.strategies.csl_explore.alerts import (
     notify_csl_cycle_summary,
     notify_csl_error,
@@ -549,6 +551,8 @@ class CslExploreOrchestrator:
 
     def _write_scan(self, summary: Dict[str, Any]) -> None:
         self.scan_log.parent.mkdir(parents=True, exist_ok=True)
+        summary = dict(summary)
+        summary.setdefault("ts", datetime.now(CN_TZ).isoformat())
         payload: Dict[str, Any] = {"latest": summary}
         if self.scan_log.exists():
             try:
