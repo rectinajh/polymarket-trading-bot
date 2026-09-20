@@ -57,14 +57,15 @@ class NarrativeStrategy:
 
         if fav_px >= NARRATIVE_FAVORITE_MIN and fav_side:
             fav_mkt = match.home_win if fav_side == "home" else match.away_win
-            if fav_mkt:
+            # Only structure with under — never buy expensive favorite alone.
+            if fav_mkt and under and fav_mkt.yes_price <= 0.55:
                 signals.append(ExploreSignal(
                     strategy=self.id,
                     match_slug=match.slug,
                     match_title=match.title,
                     action="buy_yes",
                     reason=f"narrative fav({fav_side})+under",
-                    usdc=half if under else ORDER_USDC,
+                    usdc=half,
                     condition_id=fav_mkt.condition_id,
                     question=fav_mkt.question,
                     yes_token=fav_mkt.yes_token,
@@ -72,6 +73,28 @@ class NarrativeStrategy:
                     priority=40,
                     meta={"leg": "favorite", "fav_px": fav_px},
                 ))
+            elif fav_mkt and under:
+                # Favorite too rich — under-only hedge.
+                signals.append(ExploreSignal(
+                    strategy=self.id,
+                    match_slug=match.slug,
+                    match_title=match.title,
+                    action="buy_yes",
+                    reason=f"narrative under-only (fav {fav_px:.2f} rich)",
+                    usdc=ORDER_USDC,
+                    condition_id=under.condition_id,
+                    question=under.question,
+                    yes_token=under.yes_token,
+                    limit_price=under.yes_price,
+                    priority=42,
+                    meta={"leg": "under_only", "fav_px": fav_px},
+                ))
+                return signals
+            else:
+                return [ExploreSignal(
+                    strategy=self.id, match_slug=match.slug, match_title=match.title,
+                    action="skip", reason="hot fav but no under leg", usdc=0.0, priority=80,
+                )]
         elif gap <= NARRATIVE_TOSSUP_MAX_GAP and match.draw is not None:
             signals.append(ExploreSignal(
                 strategy=self.id,

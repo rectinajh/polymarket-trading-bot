@@ -20,6 +20,7 @@ from src.strategies.eu5_plus.config import (
     DEFAULT_STATE,
     ENABLED_STRATS,
     EXIT_FAIL_COOLDOWN_S,
+    HARD_MAX_USDC,
     MAX_ENTRIES_PER_DAY,
     MAX_PER_MATCH_USDC,
     STOP_LOSS_PCT,
@@ -272,14 +273,34 @@ class Eu5PlusOrchestrator:
             self.ledger.append({"kind": "error", "error": "no_client_or_price", **sig.to_dict()})
             return False, 0.0
         try:
+            # Cap notional: prefer fewer shares over blowing HARD_MAX.
+            px_f = float(px)
+            from math import ceil
+            from src.strategies.eu5_plus.config import MIN_SHARES, ORDER_USDC
+            want = max(MIN_SHARES, int(ceil(float(sig.usdc) / px_f - 1e-12)))
+            while want > MIN_SHARES and want * px_f > HARD_MAX_USDC + 1e-9:
+                want -= 1
+            if want * px_f > HARD_MAX_USDC + 1e-9:
+                self.ledger.append({
+                    "kind": "error", "error": "hard_max", **sig.to_dict(),
+                })
+                print(
+                    f"   skip hard_max {want}x@{px_f:.3f}=${want*px_f:.2f}",
+                    flush=True,
+                )
+                return False, 0.0
+            capped_usdc = min(float(sig.usdc), want * px_f)
             shares, fill_px, raw = await place_yes_buy(
                 self.client, self.gamma,
                 condition_id=sig.condition_id,
-                price=float(px),
-                usdc=float(sig.usdc),
+                price=px_f,
+                usdc=max(ORDER_USDC * 0.5, min(capped_usdc, HARD_MAX_USDC)),
                 yes_token=sig.yes_token or "",
             )
             cost = round(shares * fill_px, 4)
+            if cost > HARD_MAX_USDC + 0.25:
+                # Still oversized after executor floor — record but don't inflate week more than hard.
+                print(f"   ⚠️ oversized fill ${cost:.2f} (hard ${HARD_MAX_USDC})", flush=True)
             self._mark_filled(
                 f"{sig.strategy}:{sig.condition_id}",
                 f"cond:{sig.condition_id}",
