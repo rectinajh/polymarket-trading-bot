@@ -7,6 +7,17 @@ PnL 数字仍记在 [NET_PNL.md](NET_PNL.md)。**阶段计划与决策门**见 [
 
 ---
 
+## 2026-09-20 — EU5+ 六策略并行袖套（live）
+
+**目的：** 与 EU5 公允价 / 彩票并行：平局 FV、赛前滞后、1X2 完备、赛中久平、让球/大小球交叉、叙事对冲。
+
+- 包 `src/strategies/eu5_plus/`：周预算 **$15**、日限 **8**、单笔 ~$1.01、−50% 止损
+- CLI：`python cli.py run --eu5-plus --live --loop --interval 300`
+- PM2：`polymarket-eu5-plus`；账本 `eu5_plus_ledger.jsonl` / `eu5_plus_state.json`
+- Dashboard Overview + 策略参数页已挂
+
+---
+
 ## 2026-09-20 — 彩票娱乐袖套（并行 EU5 公允价）
 
 **目的：** 用户要求主策略 + 小钱赌高赔并行；娱乐金隔离，不计入公允价复盘。

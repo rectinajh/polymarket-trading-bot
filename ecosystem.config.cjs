@@ -74,6 +74,28 @@ module.exports = {
       time: true,
     },
     {
+      name: "polymarket-eu5-plus",
+      cwd: "/www/polymarket-trading-bot",
+      script: "/www/polymarket-trading-bot/.venv/bin/python",
+      // EU5 parallel: draw_fv, kickoff_lag, completeness, live_draw, line_cross, narrative.
+      // Week $15 · ≤8/day · isolated from EU5 FV + lottery.
+      args: "cli.py run --eu5-plus --live --loop --interval 300 --log-level INFO",
+      interpreter: "none",
+      autorestart: true,
+      max_restarts: 20,
+      min_uptime: "10s",
+      restart_delay: 5000,
+      kill_timeout: 15000,
+      max_memory_restart: "500M",
+      env: {
+        PYTHONUNBUFFERED: "1",
+      },
+      out_file: "/www/polymarket-trading-bot/logs/pm2-eu5-plus-out.log",
+      error_file: "/www/polymarket-trading-bot/logs/pm2-eu5-plus-error.log",
+      merge_logs: true,
+      time: true,
+    },
+    {
       name: "polymarket-eu5",
       cwd: "/www/polymarket-trading-bot",
       script: "/www/polymarket-trading-bot/.venv/bin/python",

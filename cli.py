@@ -105,6 +105,15 @@ def cmd_run(args: argparse.Namespace) -> None:
         )
         return
 
+    # --eu5-plus: six parallel EU5 strategies (draw/lag/completeness/live/lines/narrative)
+    if getattr(args, "eu5_plus", False):
+        _run_eu5_plus(
+            live_mode=live_mode,
+            loop=getattr(args, "loop", False),
+            interval=getattr(args, "interval", 300),
+        )
+        return
+
     # --safe-compounder mode: edge-based NO-side only
     if safe_compounder:
         _run_safe_compounder(
@@ -599,6 +608,86 @@ def _run_lottery(
             asyncio.run(_run_once())
     except KeyboardInterrupt:
         print("\nLottery sleeve stopped by user.")
+
+
+def _run_eu5_plus(
+    live_mode: bool = False,
+    loop: bool = False,
+    interval: int = 300,
+) -> None:
+    """EU5 parallel sleeve: draw_fv / kickoff_lag / completeness / live_draw / line_cross / narrative."""
+    from src.clients import build_polymarket_clients
+    from src.clients.odds_api_client import OddsAPIClient
+    from src.strategies.eu5_plus import Eu5PlusOrchestrator
+    from src.strategies.eu5_plus.config import (
+        ENABLED_STRATS,
+        MAX_ENTRIES_PER_DAY,
+        WEEK_BUDGET_USDC,
+    )
+
+    _apply_live_flags(live_mode)
+
+    print("⚽ EU5+ PARALLEL SLEEVE")
+    print(f"   Enabled: {', '.join(ENABLED_STRATS)}")
+    print(
+        f"   Week ≤${WEEK_BUDGET_USDC:.2f} · ≤{MAX_ENTRIES_PER_DAY}/day · "
+        f"min ~$1.01 · isolated ledger"
+    )
+    print("   Alongside EU5 FV + lottery; own data/eu5_plus_* files.")
+    if not live_mode:
+        print("   DRY RUN — plans only (pass --live to trade)")
+    else:
+        print("   ⚠️  LIVE multi-strategy — expect mixed EV.")
+    if loop:
+        print(f"   Continuous — every {interval}s. Ctrl-C to stop.")
+
+    async def _run_once():
+        odds = OddsAPIClient()
+        async with build_polymarket_clients() as (client, gamma):
+            strat = Eu5PlusOrchestrator(
+                dry_run=not live_mode,
+                client=client,
+                gamma=gamma,
+                odds=odds,
+            )
+            try:
+                return await strat.run()
+            finally:
+                await strat.close()
+
+    async def _run_forever():
+        cycle = 0
+        odds = OddsAPIClient()
+        async with build_polymarket_clients() as (client, gamma):
+            strat = Eu5PlusOrchestrator(
+                dry_run=not live_mode,
+                client=client,
+                gamma=gamma,
+                odds=odds,
+            )
+            try:
+                while True:
+                    cycle += 1
+                    print(
+                        f"\n──── EU5+ Cycle {cycle} — "
+                        f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ────"
+                    )
+                    try:
+                        await strat.run()
+                    except Exception as exc:
+                        print(f"Cycle {cycle} failed: {exc}. Continuing after {interval}s.")
+                    print(f"\n⏳ Sleeping {interval}s...")
+                    await asyncio.sleep(interval)
+            finally:
+                await strat.close()
+
+    try:
+        if loop:
+            asyncio.run(_run_forever())
+        else:
+            asyncio.run(_run_once())
+    except KeyboardInterrupt:
+        print("\nEU5+ sleeve stopped by user.")
 
 
 def cmd_dashboard(args: argparse.Namespace) -> None:
@@ -1257,6 +1346,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="lottery",
         help="Lottery sleeve: EU5 longshots ≤15¢, week $10, ≤5/day (entertainment)",
+    )
+    strategy_group.add_argument(
+        "--eu5-plus",
+        action="store_true",
+        dest="eu5_plus",
+        help="EU5+ parallel: draw_fv/kickoff_lag/completeness/live_draw/line_cross/narrative",
     )
     p_run.add_argument(
         "--loop",

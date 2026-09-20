@@ -248,3 +248,8 @@ data/lottery_pnl.json
 data/daily_entries_lottery.json
 data/scan_stats_lottery.json
 data/lottery_state.json
+data/eu5_plus_ledger.jsonl
+data/eu5_plus_state.json
+data/scan_stats_eu5_plus.json
+data/eu5_plus_reference.json
+data/daily_entries_eu5_plus.json

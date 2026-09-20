@@ -77,6 +77,15 @@ from src.strategies.lottery.config import (
     PRICE_MAX as LOTTERY_PRICE_MAX,
     WEEK_BUDGET_USDC as LOTTERY_WEEK_BUDGET,
 )
+from src.strategies.eu5_plus.config import (
+    DEFAULT_LEDGER as EU5_PLUS_LEDGER_PATH,
+    DEFAULT_SCAN_LOG as EU5_PLUS_STATS_PATH,
+    DEFAULT_STATE as EU5_PLUS_STATE_PATH,
+    ENABLED_STRATS as EU5_PLUS_ENABLED,
+    MAX_ENTRIES_PER_DAY as EU5_PLUS_MAX_DAY,
+    ORDER_USDC as EU5_PLUS_ORDER,
+    WEEK_BUDGET_USDC as EU5_PLUS_WEEK_BUDGET,
+)
 from src.utils.ops_metrics import count_since
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -1074,6 +1083,33 @@ def render_strategy_params() -> None:
     except Exception as exc:
         st.warning(f"lottery config 读取失败: {exc}")
 
+    # --- EU5+ Parallel ---
+    try:
+        from src.strategies.eu5_plus import config as ep
+
+        st.subheader("⚽ EU5+ 并行六策略 sleeve")
+        st.dataframe(
+            _param_rows([
+                ("启用策略", ", ".join(ep.ENABLED_STRATS),
+                 "draw_fv/kickoff_lag/completeness/live_draw/line_cross/narrative",
+                 "EU5_PLUS_ENABLED_STRATS"),
+                ("WEEK_BUDGET_USDC", ep.WEEK_BUDGET_USDC, "每周预算（$）",
+                 "EU5_PLUS_WEEK_BUDGET_USDC"),
+                ("MAX_ENTRIES_PER_DAY", ep.MAX_ENTRIES_PER_DAY, "每日上限",
+                 "EU5_PLUS_MAX_ENTRIES_PER_DAY"),
+                ("ORDER_USDC", ep.ORDER_USDC, "单笔名义（$）", "EU5_PLUS_ORDER_USDC"),
+                ("DRAW_MIN_EDGE", ep.DRAW_MIN_EDGE, "平局公允边", "EU5_PLUS_DRAW_MIN_EDGE"),
+                ("COMPLETENESS_MIN_GAP", ep.COMPLETENESS_MIN_GAP,
+                 "1X2 完备缺口", "EU5_PLUS_COMPLETENESS_MIN_GAP"),
+                ("LIVE_DRAW_MINUTE", ep.LIVE_DRAW_MINUTE,
+                 "赛中久平起始分钟", "EU5_PLUS_LIVE_DRAW_MINUTE"),
+                ("STOP_LOSS_PCT", ep.STOP_LOSS_PCT, "止损比例", "EU5_PLUS_STOP_LOSS_PCT"),
+            ]),
+            hide_index=True, width="stretch",
+        )
+    except Exception as exc:
+        st.warning(f"eu5_plus config 读取失败: {exc}")
+
     # --- CSL Explore ---
     try:
         from src.strategies.csl_explore import config as csl
@@ -2041,6 +2077,118 @@ def render_lottery_panel(project_root: Path) -> None:
 
 
 @st.cache_data(ttl=30)
+def _load_eu5_plus_dashboard_data(stats_path: str, state_path: str, ledger_path: str) -> dict:
+    latest: dict = {}
+    try:
+        if Path(stats_path).exists():
+            raw = json.loads(Path(stats_path).read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                latest = raw.get("latest") or {}
+                if not latest:
+                    cycles = raw.get("cycles") or []
+                    if cycles and isinstance(cycles[-1], dict):
+                        latest = cycles[-1]
+    except (OSError, json.JSONDecodeError, TypeError):
+        latest = {}
+    state: dict = {}
+    try:
+        if Path(state_path).exists():
+            state = json.loads(Path(state_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        state = {}
+    from src.strategies.csl_explore.ledger import ExploreLedger
+    led = ExploreLedger(ledger_path=Path(ledger_path), state_path=Path(state_path))
+    return {
+        "latest": latest,
+        "week_spent": float(state.get("spent_usdc") or latest.get("week_spent") or 0),
+        "week_id": state.get("week_id"),
+        "opens": len(led.open_positions()),
+        "pnl": led.pnl_summary(),
+        "entries_remaining": DailyEntryLog(
+            path=Path("data") / "daily_entries_eu5_plus.json",
+            limit=EU5_PLUS_MAX_DAY,
+        ).remaining(),
+    }
+
+
+def render_eu5_plus_panel(project_root: Path) -> None:
+    """EU5+ six-strategy parallel sleeve."""
+    data = _load_eu5_plus_dashboard_data(
+        str(project_root / EU5_PLUS_STATS_PATH),
+        str(project_root / EU5_PLUS_STATE_PATH),
+        str(project_root / EU5_PLUS_LEDGER_PATH),
+    )
+    latest = data["latest"] or {}
+    spent = float(data.get("week_spent") or 0)
+    pnl = data.get("pnl") or {}
+    is_live = bool(latest.get("live"))
+
+    st.subheader("⚽ EU5+ 并行策略（1–6）")
+    st.caption(
+        f"模式 {'**live**' if is_live else ('dry-run' if latest else '等待首轮')} · "
+        f"周预算 **${EU5_PLUS_WEEK_BUDGET:.2f}** · 日限 {EU5_PLUS_MAX_DAY} · "
+        f"单笔 ~${EU5_PLUS_ORDER:.2f} · "
+        f"策略 {', '.join(EU5_PLUS_ENABLED)} · "
+        f"最近 {_format_scan_ts(latest.get('ts'))}"
+    )
+
+    if spent >= EU5_PLUS_WEEK_BUDGET - 1e-9:
+        st.warning(f"🛑 本周预算已用尽 ${spent:.2f} / ${EU5_PLUS_WEEK_BUDGET:.2f}")
+    elif latest:
+        st.success(
+            f"✅ 运行中 · 本周 **${spent:.2f}** / ${EU5_PLUS_WEEK_BUDGET:.2f} · "
+            f"参考 {latest.get('ref_source', '—')} · "
+            f"日剩 {data.get('entries_remaining', '—')}"
+        )
+
+    if not latest:
+        st.info(f"尚无扫描。启动 `polymarket-eu5-plus` → `{EU5_PLUS_STATS_PATH}`")
+        st.markdown("---")
+        return
+
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    with c1:
+        st.metric("场次", latest.get("matches", 0))
+    with c2:
+        st.metric("Pinnacle 匹配", latest.get("ref_matched", 0))
+    with c3:
+        st.metric("买入信号", latest.get("buy_signals", 0))
+    with c4:
+        st.metric("本轮成交", latest.get("placed", 0))
+    with c5:
+        st.metric("周花费", f"${spent:.2f}")
+    with c6:
+        st.metric("持仓", data.get("opens", 0))
+
+    by = latest.get("by_strategy") or {}
+    if by:
+        st.caption("本轮分策略成交：" + " · ".join(f"{k}={v}" for k, v in by.items()))
+
+    p1, p2, p3 = st.columns(3)
+    with p1:
+        st.metric("已实现", f"${float(pnl.get('realized_usdc') or 0):+.2f}")
+    with p2:
+        st.metric("未实现", f"${float(pnl.get('unrealized_usdc') or 0):+.2f}")
+    with p3:
+        st.metric("止损本轮", latest.get("stop_losses", 0))
+
+    planned = latest.get("planned") or []
+    if planned:
+        with st.expander("本轮计划/信号", expanded=False):
+            rows = [{
+                "策略": p.get("strategy"),
+                "动作": p.get("action"),
+                "金额": p.get("usdc"),
+                "价": p.get("limit_price"),
+                "理由": (p.get("reason") or "")[:80],
+                "场次": (p.get("match_title") or "")[:40],
+            } for p in planned[:30]]
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+    st.markdown("---")
+
+
+@st.cache_data(ttl=30)
 def _load_csl_dashboard_data(stats_path: str, state_path: str, ledger_path: str) -> dict:
     """Latest CSL explore scan + open positions + PnL + recent ledger rows."""
     from src.strategies.csl_explore.ledger import ExploreLedger
@@ -2567,6 +2715,7 @@ def show_overview(performance_data, positions, system_health_data, open_orders=N
     render_sports_rn1_panel(PROJECT_ROOT)
     render_eu5_panel(PROJECT_ROOT)
     render_lottery_panel(PROJECT_ROOT)
+    render_eu5_plus_panel(PROJECT_ROOT)
     render_csl_explore_panel(PROJECT_ROOT)
     render_btc15m_panel(PROJECT_ROOT)
     render_conservative_scan_panel(PROJECT_ROOT)
