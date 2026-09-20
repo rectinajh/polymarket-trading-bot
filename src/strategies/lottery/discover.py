@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
-from src.clients.gamma_client import GammaClient
+from src.clients.gamma_client import GammaClient, KNOWN_TAG_IDS
 from src.strategies.lottery.config import (
     EU5_HINTS,
     MAX_DAYS_AHEAD,
@@ -16,7 +15,23 @@ from src.strategies.lottery.config import (
     PRICE_MIN,
     REQUIRE_EU5_HINT,
 )
-from src.strategies.sports.discover import SOCCER_TAG_IDS
+
+# Soccer only — never include sports=1 (floods NFL and crowds out soccer).
+LOTTERY_TAG_IDS = sorted({
+    KNOWN_TAG_IDS.get("soccer", 100350),
+    KNOWN_TAG_IDS.get("epl", 306),
+})
+
+# Event slug prefixes / tag slugs for top-5 EU leagues (+ UCL).
+EU5_SLUG_PREFIXES = (
+    "epl-", "lal-", "lla-", "sea-", "bun-", "bl1-", "fl1-", "lig-",
+    "ucl-", "uel-", "cdf-",  # cup fixtures still EU5 clubs
+)
+EU5_TAG_SLUGS = {
+    "epl", "premier-league", "la-liga", "laliga", "serie-a", "sea",
+    "bundesliga", "ligue-1", "ligue1", "ucl", "champions-league",
+    "europa-league",
+}
 
 WIN_ON_DATE = re.compile(
     r"^Will (.+?) win on (\d{4}-\d{2}-\d{2})\?\s*$",
@@ -40,13 +55,38 @@ class LotteryTicket:
     tick_size: float
     yes_token: str
     no_token: str
-    kind: str  # win | draw | other
+    kind: str  # win | draw
     raw: Dict[str, Any]
 
 
 def _eu5_blob(text: str) -> bool:
     t = (text or "").lower()
     return any(h in t for h in EU5_HINTS)
+
+
+def _event_meta(m: Dict[str, Any]) -> tuple[str, str, Set[str]]:
+    """Return (event_slug, event_title, tag_slugs)."""
+    events = m.get("events") or []
+    ev = events[0] if events and isinstance(events[0], dict) else {}
+    slug = str(ev.get("slug") or m.get("slug") or "").lower()
+    title = str(ev.get("title") or "").lower()
+    tag_slugs: Set[str] = set()
+    for t in ev.get("tags") or []:
+        if isinstance(t, dict):
+            s = (t.get("slug") or t.get("label") or "").strip().lower()
+            if s:
+                tag_slugs.add(s)
+    return slug, title, tag_slugs
+
+
+def _is_eu5_market(m: Dict[str, Any], question: str, label: str) -> bool:
+    slug, title, tag_slugs = _event_meta(m)
+    if any(slug.startswith(p) for p in EU5_SLUG_PREFIXES):
+        return True
+    if tag_slugs & EU5_TAG_SLUGS:
+        return True
+    blob = f"{question} {label} {slug} {title}"
+    return _eu5_blob(blob)
 
 
 def _parse_ticket(m: Dict[str, Any]) -> Optional[LotteryTicket]:
@@ -69,8 +109,8 @@ def _parse_ticket(m: Dict[str, Any]) -> Optional[LotteryTicket]:
     if not cond:
         return None
 
-    kind = "other"
-    label = q[:60]
+    kind = ""
+    label = ""
     mo = WIN_ON_DATE.match(q)
     if mo:
         kind = "win"
@@ -80,8 +120,10 @@ def _parse_ticket(m: Dict[str, Any]) -> Optional[LotteryTicket]:
         if mo2:
             kind = "draw"
             label = mo2.group(1).strip()
+    if kind not in ("win", "draw"):
+        return None  # spreads / O/U are not lottery tickets
 
-    if REQUIRE_EU5_HINT and not _eu5_blob(f"{q} {label}"):
+    if REQUIRE_EU5_HINT and not _is_eu5_market(m, q, label):
         return None
 
     tick = m.get("orderPriceMinTickSize") or m.get("minimum_tick_size") or 0.01
@@ -118,7 +160,7 @@ async def fetch_lottery_tickets(
         closed=False,
         archived=False,
         accepting_orders=True,
-        tag_ids=SOCCER_TAG_IDS,
+        tag_ids=LOTTERY_TAG_IDS,
         max_time_to_expiry_days=max_days,
         min_time_to_expiry_minutes=min_minutes,
         order="volume24hr",

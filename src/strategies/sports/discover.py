@@ -15,9 +15,9 @@ WIN_ON_DATE = re.compile(
     re.IGNORECASE,
 )
 
+# Soccer / EPL / UCL only — do NOT include sports=1 (NFL flood).
 SOCCER_TAG_IDS = sorted({
     KNOWN_TAG_IDS.get("soccer", 100350),
-    KNOWN_TAG_IDS.get("sports", 1),
     KNOWN_TAG_IDS.get("epl", 306),
     KNOWN_TAG_IDS.get("ucl", 100977),
 })

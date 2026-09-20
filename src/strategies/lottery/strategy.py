@@ -286,23 +286,8 @@ class LotterySleeve:
                 match_date = trading_day_safe()
 
         if self.dry_run:
-            print(f"  [DRY] Would FOK YES x{shares} @ {price:.3f}", flush=True)
-            self.pnl.record_entry(
-                condition_id=t.condition_id,
-                title=t.question,
-                team=t.label,
-                match_date=match_date,
-                shares=shares,
-                price=price,
-                fair_prob=price,
-                edge=0.0,
-                sport=f"lottery:{t.kind}",
-                match=t.question,
-                live=False,
-                side="yes",
-            )
-            self._entries.record(t.condition_id, t.question, kind=f"lottery:{t.kind}")
-            self.state.add_spent(cost)
+            # Do not touch live ledgers / week budget — dry must not block LIVE.
+            print(f"  [DRY] Would FOK YES x{shares} @ {price:.3f} (${cost:.2f})", flush=True)
             return True
 
         try:

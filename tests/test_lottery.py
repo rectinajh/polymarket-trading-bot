@@ -9,7 +9,7 @@ from src.strategies.lottery.config import (
     PRICE_MAX,
     WEEK_BUDGET_USDC,
 )
-from src.strategies.lottery.discover import _eu5_blob, _parse_ticket
+from src.strategies.lottery.discover import _eu5_blob, _is_eu5_market, _parse_ticket
 from src.strategies.lottery.strategy import ticket_shares
 
 
@@ -45,11 +45,33 @@ class TestParseTicket(unittest.TestCase):
             "_outcome_prices": [0.12, 0.88],
             "_token_ids": ("y", "n"),
             "_condition_id": "0xabc",
+            "events": [{
+                "slug": "epl-ars-xxx-2026-09-21",
+                "title": "Arsenal vs. Foo",
+                "tags": [{"slug": "epl", "label": "EPL"}],
+            }],
         }
         t = _parse_ticket(m)
         self.assertIsNotNone(t)
         self.assertEqual(t.kind, "win")
         self.assertEqual(t.label, "Arsenal")
+
+    def test_eu5_via_slug(self) -> None:
+        m = {
+            "question": "Will US Lecce win on 2026-09-20?",
+            "events": [{"slug": "sea-mil-lec-2026-09-20", "tags": [{"slug": "sea"}]}],
+        }
+        self.assertTrue(_is_eu5_market(m, m["question"], "US Lecce"))
+
+    def test_reject_spread(self) -> None:
+        m = {
+            "question": "Spread: Sunderland AFC (-2.5)",
+            "_outcome_prices": [0.05, 0.95],
+            "_token_ids": ("y", "n"),
+            "_condition_id": "0xsp",
+            "events": [{"slug": "epl-mac-sun-2026-09-20"}],
+        }
+        self.assertIsNone(_parse_ticket(m))
 
 
 if __name__ == "__main__":
