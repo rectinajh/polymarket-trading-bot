@@ -96,6 +96,15 @@ def cmd_run(args: argparse.Namespace) -> None:
         )
         return
 
+    # --lottery: entertainment longshots (isolated week budget)
+    if getattr(args, "lottery", False):
+        _run_lottery(
+            live_mode=live_mode,
+            loop=getattr(args, "loop", False),
+            interval=getattr(args, "interval", 300),
+        )
+        return
+
     # --safe-compounder mode: edge-based NO-side only
     if safe_compounder:
         _run_safe_compounder(
@@ -530,6 +539,66 @@ def _run_eu5(
             asyncio.run(_run_once())
     except KeyboardInterrupt:
         print("\nEU5 sleeve stopped by user.")
+
+
+def _run_lottery(
+    live_mode: bool = False,
+    loop: bool = False,
+    interval: int = 300,
+) -> None:
+    """Entertainment lottery sleeve: EU5-ish longshots, week budget $10."""
+    from src.clients import build_polymarket_clients
+    from src.strategies.lottery import LotterySleeve
+    from src.strategies.lottery.config import (
+        MAX_ENTRIES_PER_DAY,
+        PRICE_MAX,
+        WEEK_BUDGET_USDC,
+    )
+
+    _apply_live_flags(live_mode)
+
+    print("🎰 LOTTERY SLEEVE (entertainment longshots)")
+    print(
+        f"   YES ≤ ${PRICE_MAX:.2f} · week ≤${WEEK_BUDGET_USDC:.2f} · "
+        f"≤{MAX_ENTRIES_PER_DAY}/day · min CLOB ticket"
+    )
+    print("   Isolated: data/lottery_pnl.json · NOT part of EU5 fair-value.")
+    if not live_mode:
+        print("   DRY RUN — no real orders (pass --live to trade)")
+    else:
+        print("   ⚠️  LIVE entertainment — expect negative EV.")
+    if loop:
+        print(f"   Continuous — every {interval}s. Ctrl-C to stop.")
+
+    async def _run_once():
+        async with build_polymarket_clients() as (client, gamma):
+            strat = LotterySleeve(client=client, gamma=gamma, dry_run=not live_mode)
+            return await strat.run()
+
+    async def _run_forever():
+        cycle = 0
+        async with build_polymarket_clients() as (client, gamma):
+            strat = LotterySleeve(client=client, gamma=gamma, dry_run=not live_mode)
+            while True:
+                cycle += 1
+                print(
+                    f"\n──── Lottery Cycle {cycle} — "
+                    f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ────"
+                )
+                try:
+                    await strat.run()
+                except Exception as exc:
+                    print(f"Cycle {cycle} failed: {exc}. Continuing after {interval}s.")
+                print(f"\n⏳ Sleeping {interval}s...")
+                await asyncio.sleep(interval)
+
+    try:
+        if loop:
+            asyncio.run(_run_forever())
+        else:
+            asyncio.run(_run_once())
+    except KeyboardInterrupt:
+        print("\nLottery sleeve stopped by user.")
 
 
 def cmd_dashboard(args: argparse.Namespace) -> None:
@@ -1182,6 +1251,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="eu5",
         help="EU5 fair-value sleeve: Pinnacle ref vs PM top-5 leagues (dry-run default)",
+    )
+    strategy_group.add_argument(
+        "--lottery",
+        action="store_true",
+        dest="lottery",
+        help="Lottery sleeve: EU5 longshots ≤15¢, week $10, ≤5/day (entertainment)",
     )
     p_run.add_argument(
         "--loop",

@@ -242,3 +242,9 @@ data/eu5_pnl.json
 data/daily_entries_eu5.json
 data/scan_stats_eu5.json
 data/eu5_reference.json
+
+# Lottery sleeve
+data/lottery_pnl.json
+data/daily_entries_lottery.json
+data/scan_stats_lottery.json
+data/lottery_state.json

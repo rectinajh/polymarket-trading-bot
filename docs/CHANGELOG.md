@@ -7,6 +7,17 @@ PnL 数字仍记在 [NET_PNL.md](NET_PNL.md)。**阶段计划与决策门**见 [
 
 ---
 
+## 2026-09-20 — 彩票娱乐袖套（并行 EU5 公允价）
+
+**目的：** 用户要求主策略 + 小钱赌高赔并行；娱乐金隔离，不计入公允价复盘。
+
+- 新包 `src/strategies/lottery/`：YES ≤15¢、周预算 **$10**、日限 **5**、CLOB 最小票
+- CLI：`python cli.py run --lottery --live --loop --interval 300`
+- PM2：`polymarket-lottery`；账本 `lottery_pnl.json` / `lottery_state.json`
+- Dashboard Overview + 策略参数页已挂
+
+---
+
 ## 2026-09-19 — EU5 五大联赛公允价值袖套（新）
 
 **目的：** 替代「无参照跟单」思路——用 Pinnacle h2h 去水概率做公允价，PM 薄盘偏离 ≥4¢ 才下手。

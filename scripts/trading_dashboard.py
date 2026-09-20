@@ -68,6 +68,15 @@ from src.strategies.csl_explore.config import (
     STOP_LOSS_PCT as CSL_STOP_LOSS_PCT,
     WEEK_BUDGET_USDC as CSL_WEEK_BUDGET,
 )
+from src.strategies.lottery.config import (
+    DEFAULT_LEDGER as LOTTERY_LEDGER_PATH,
+    DEFAULT_PNL_PATH as LOTTERY_PNL_PATH,
+    DEFAULT_SCAN_LOG as LOTTERY_STATS_PATH,
+    DEFAULT_STATE as LOTTERY_STATE_PATH,
+    MAX_ENTRIES_PER_DAY as LOTTERY_MAX_DAY,
+    PRICE_MAX as LOTTERY_PRICE_MAX,
+    WEEK_BUDGET_USDC as LOTTERY_WEEK_BUDGET,
+)
 from src.utils.ops_metrics import count_since
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -1040,6 +1049,31 @@ def render_strategy_params() -> None:
     except Exception as exc:
         st.warning(f"eu5 config 读取失败: {exc}")
 
+    # --- Lottery ---
+    try:
+        from src.strategies.lottery import config as lot
+
+        st.subheader("🎰 彩票娱乐 sleeve（与 EU5 公允价隔离）")
+        st.dataframe(
+            _param_rows([
+                ("性质", "娱乐 / 负期望预期", "不计入主策略是否有效", ""),
+                ("PRICE_MAX", lot.PRICE_MAX, "YES ask 上限（长尾）", "LOTTERY_PRICE_MAX"),
+                ("WEEK_BUDGET_USDC", lot.WEEK_BUDGET_USDC, "每周娱乐金（$）",
+                 "LOTTERY_WEEK_BUDGET_USDC"),
+                ("MAX_ENTRIES_PER_DAY", lot.MAX_ENTRIES_PER_DAY, "每日上限",
+                 "LOTTERY_MAX_ENTRIES_PER_DAY"),
+                ("MIN_NOTIONAL", lot.MIN_NOTIONAL, "单笔最小名义（CLOB）",
+                 "LOTTERY_MIN_NOTIONAL"),
+                ("HARD_MAX_USDC", lot.HARD_MAX_USDC, "单笔硬顶（$）",
+                 "LOTTERY_HARD_MAX_USDC"),
+                ("REQUIRE_EU5_HINT", lot.REQUIRE_EU5_HINT,
+                 "队名/标题需像五大联赛", "LOTTERY_REQUIRE_EU5"),
+            ]),
+            hide_index=True, width="stretch",
+        )
+    except Exception as exc:
+        st.warning(f"lottery config 读取失败: {exc}")
+
     # --- CSL Explore ---
     try:
         from src.strategies.csl_explore import config as csl
@@ -1914,6 +1948,99 @@ def render_eu5_panel(project_root: Path) -> None:
 
 
 @st.cache_data(ttl=30)
+def _load_lottery_dashboard_data(
+    stats_path: str, state_path: str, pnl_path: str, ledger_path: str,
+) -> dict:
+    latest: dict = {}
+    try:
+        if Path(stats_path).exists():
+            raw = json.loads(Path(stats_path).read_text(encoding="utf-8"))
+            cycles = (raw.get("cycles") or []) if isinstance(raw, dict) else []
+            if cycles and isinstance(cycles[-1], dict):
+                latest = cycles[-1]
+    except (OSError, json.JSONDecodeError, TypeError):
+        latest = {}
+    state: dict = {}
+    try:
+        if Path(state_path).exists():
+            state = json.loads(Path(state_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        state = {}
+    entries = DailyEntryLog(path=Path(ledger_path), limit=LOTTERY_MAX_DAY)
+    pnl = SportsPnL(Path(pnl_path))
+    return {
+        "latest": latest,
+        "week_spent": float(state.get("spent_usdc") or latest.get("week_spent") or 0),
+        "week_id": state.get("week_id"),
+        "entries_used": LOTTERY_MAX_DAY - entries.remaining(),
+        "entries_remaining": entries.remaining(),
+        "experiment": pnl.experiment_summary(),
+        "recent": pnl.recent_entries(10),
+    }
+
+
+def render_lottery_panel(project_root: Path) -> None:
+    """Entertainment lottery sleeve (isolated week budget)."""
+    data = _load_lottery_dashboard_data(
+        str(project_root / LOTTERY_STATS_PATH),
+        str(project_root / LOTTERY_STATE_PATH),
+        str(project_root / LOTTERY_PNL_PATH),
+        str(project_root / LOTTERY_LEDGER_PATH),
+    )
+    latest = data["latest"] or {}
+    spent = float(data.get("week_spent") or 0)
+    exp = data.get("experiment") or {}
+    is_live = bool(latest.get("live"))
+
+    st.subheader("🎰 彩票娱乐（五大联赛长尾）")
+    st.caption(
+        f"模式 {'**live**' if is_live else ('dry-run' if latest else '等待首轮')} · "
+        f"YES ≤ **${LOTTERY_PRICE_MAX:.2f}** · 周预算 **${LOTTERY_WEEK_BUDGET:.2f}** · "
+        f"日限 {LOTTERY_MAX_DAY} · 最小 CLOB 票 · "
+        f"最近 {_format_scan_ts(latest.get('ts'))}"
+    )
+    st.info("娱乐金：预期负期望；不计入 EU5 公允价是否有效。")
+
+    if spent >= LOTTERY_WEEK_BUDGET - 1e-9:
+        st.warning(f"🛑 本周娱乐金已用尽 ${spent:.2f} / ${LOTTERY_WEEK_BUDGET:.2f}")
+    elif latest:
+        st.success(
+            f"✅ 运行中 · 本周已花 **${spent:.2f}** / ${LOTTERY_WEEK_BUDGET:.2f} · "
+            f"日限 {data['entries_used']}/{LOTTERY_MAX_DAY}"
+        )
+
+    if not latest:
+        st.info(f"尚无扫描。启动 `polymarket-lottery` → `{LOTTERY_STATS_PATH}`")
+        st.markdown("---")
+        return
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        st.metric("候选", latest.get("lottery_candidates", 0))
+    with c2:
+        st.metric("信号", latest.get("signals", 0))
+    with c3:
+        st.metric("本轮下单", latest.get("placed", 0))
+    with c4:
+        st.metric("日限", f"{data['entries_used']}/{LOTTERY_MAX_DAY}")
+    with c5:
+        st.metric("周花费", f"${spent:.2f}")
+
+    p1, p2 = st.columns(2)
+    with p1:
+        st.metric("累计已实现", f"${int(exp.get('realized_pnl_cents') or 0)/100:+.2f}")
+    with p2:
+        st.metric("持仓中", int(exp.get("open") or 0))
+
+    sigs = latest.get("signals_detail") or []
+    if sigs:
+        with st.expander("本轮彩票信号", expanded=False):
+            st.dataframe(pd.DataFrame(sigs), hide_index=True, width="stretch")
+
+    st.markdown("---")
+
+
+@st.cache_data(ttl=30)
 def _load_csl_dashboard_data(stats_path: str, state_path: str, ledger_path: str) -> dict:
     """Latest CSL explore scan + open positions + PnL + recent ledger rows."""
     from src.strategies.csl_explore.ledger import ExploreLedger
@@ -2439,6 +2566,7 @@ def show_overview(performance_data, positions, system_health_data, open_orders=N
     render_ops_status_panel(PROJECT_ROOT)
     render_sports_rn1_panel(PROJECT_ROOT)
     render_eu5_panel(PROJECT_ROOT)
+    render_lottery_panel(PROJECT_ROOT)
     render_csl_explore_panel(PROJECT_ROOT)
     render_btc15m_panel(PROJECT_ROOT)
     render_conservative_scan_panel(PROJECT_ROOT)

@@ -52,6 +52,28 @@ module.exports = {
       time: true,
     },
     {
+      name: "polymarket-lottery",
+      cwd: "/www/polymarket-trading-bot",
+      script: "/www/polymarket-trading-bot/.venv/bin/python",
+      // Entertainment longshots: week $10, ≤5/day, YES≤15¢, min CLOB ticket.
+      // Isolated from EU5 fair-value; expect negative EV.
+      args: "cli.py run --lottery --live --loop --interval 300 --log-level INFO",
+      interpreter: "none",
+      autorestart: true,
+      max_restarts: 20,
+      min_uptime: "10s",
+      restart_delay: 5000,
+      kill_timeout: 15000,
+      max_memory_restart: "400M",
+      env: {
+        PYTHONUNBUFFERED: "1",
+      },
+      out_file: "/www/polymarket-trading-bot/logs/pm2-lottery-out.log",
+      error_file: "/www/polymarket-trading-bot/logs/pm2-lottery-error.log",
+      merge_logs: true,
+      time: true,
+    },
+    {
       name: "polymarket-eu5",
       cwd: "/www/polymarket-trading-bot",
       script: "/www/polymarket-trading-bot/.venv/bin/python",
