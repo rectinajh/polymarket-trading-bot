@@ -149,6 +149,7 @@ class ExploreLedger:
         ]
         row = dict(pos)
         row["status"] = "open"
+        row.setdefault("ts", _now_iso())
         opens.append(row)
         st["opens"] = opens
         self.save_state(st)

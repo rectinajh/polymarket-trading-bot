@@ -1010,6 +1010,10 @@ def render_strategy_params() -> None:
                  "跟单价带（避开彩票尾/锁单）", "SPORTS_RN1_COPY_PRICE_MIN/MAX"),
                 ("MW 价带", f"{sp.COPY_MW_PRICE_MIN} – {sp.COPY_MW_PRICE_MAX}",
                  "Will-win 更紧价带", "SPORTS_RN1_MW_PRICE_MIN/MAX"),
+                ("Will-win only", sp.COPY_MATCH_WINNER_ONLY,
+                 "只跟足球赛果（跳过大小球/网球）", "SPORTS_RN1_MATCH_WINNER_ONLY"),
+                ("死盘跳过", f"{sp.COPY_DEAD_PRICE_LO} – {sp.COPY_DEAD_PRICE_HI}",
+                 "价外当作死盘不跟", "SPORTS_RN1_DEAD_PRICE_LO/HI"),
                 ("COPY_STOP_LOSS_PCT", sp.COPY_STOP_LOSS_PCT,
                  "单仓止损（mark ≤ entry×(1−pct)）；止盈手动", "SPORTS_RN1_STOP_LOSS_PCT"),
                 ("COPY_FOLLOW_RN1_EXIT", sp.COPY_FOLLOW_RN1_EXIT,
@@ -1091,7 +1095,7 @@ def render_strategy_params() -> None:
         st.dataframe(
             _param_rows([
                 ("启用策略", ", ".join(ep.ENABLED_STRATS),
-                 "draw_fv/kickoff_lag/completeness/live_draw/line_cross/narrative",
+                 "draw_fv/kickoff_lag/completeness/live_draw/line_cross（narrative 已关）",
                  "EU5_PLUS_ENABLED_STRATS"),
                 ("WEEK_BUDGET_USDC", ep.WEEK_BUDGET_USDC, "每周预算（$）",
                  "EU5_PLUS_WEEK_BUDGET_USDC"),
@@ -2030,12 +2034,15 @@ def render_lottery_panel(project_root: Path) -> None:
 
     st.subheader("🎰 彩票娱乐（五大联赛长尾）")
     st.caption(
-        f"模式 {'**live**' if is_live else ('dry-run' if latest else '等待首轮')} · "
+        f"模式 {'**live**' if is_live else ('dry-run / 只扫描' if latest else '等待首轮')} · "
         f"YES ≤ **${LOTTERY_PRICE_MAX:.2f}** · 周预算 **${LOTTERY_WEEK_BUDGET:.2f}** · "
         f"日限 {LOTTERY_MAX_DAY} · 最小 CLOB 票 · "
         f"最近 {_format_scan_ts(latest.get('ts'))}"
     )
-    st.info("娱乐金：预期负期望；不计入 EU5 公允价是否有效。")
+    if is_live:
+        st.warning("彩票 sleeve 预期负期望。盈利模式应保持 dry-run（ecosystem 已去掉 --live）。")
+    else:
+        st.info("盈利模式：彩票只扫描不下单（负期望娱乐金已停）。不计入 EU5 公允价。")
 
     if spent >= LOTTERY_WEEK_BUDGET - 1e-9:
         st.warning(f"🛑 本周娱乐金已用尽 ${spent:.2f} / ${LOTTERY_WEEK_BUDGET:.2f}")

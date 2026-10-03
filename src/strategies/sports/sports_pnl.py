@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, date as date_cls
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
@@ -15,6 +15,35 @@ LEDGER_PATH = Path("data") / "sports_pnl.json"
 
 def _now_cn() -> datetime:
     return datetime.now(CN_TZ)
+
+
+def _ghost_proceeds(cost: int, shares: int, mark: int) -> tuple[int, str, str]:
+    """Classify a vanished on-chain position. mark==cost is NOT a win."""
+    if shares <= 0:
+        return 0, "lost", "no_shares"
+    redeem_cents = shares * 100
+    if mark >= int(redeem_cents * 0.90):
+        return mark, "won", "redeem"
+    if mark <= 0:
+        return 0, "lost", "unmarked"
+    if mark == cost:
+        return cost, "flat", "mark_eq_cost"
+    if mark > cost:
+        return mark, "won", "mark_gt_cost"
+    return mark, "lost", "mark_lt_cost"
+
+
+def _expired_proceeds(cost: int, shares: int, mark: int) -> tuple[int, str, str]:
+    """After match_date: only $1/share marks count as a win. Cost-snapshot is a loss."""
+    if shares <= 0:
+        return 0, "lost", "no_shares"
+    redeem_cents = shares * 100
+    if mark >= int(redeem_cents * 0.90):
+        return mark, "won", "redeem"
+    if mark > 0 and mark != cost:
+        status = "won" if mark > cost else "lost"
+        return mark, status, "sold"
+    return 0, "lost", "expired_worthless"
 
 
 class SportsPnL:
@@ -211,14 +240,51 @@ class SportsPnL:
             cost = int(entry.get("cost_cents") or 0)
             shares = int(entry.get("shares") or 0)
             mark = int(entry.get("mark_cents") or 0)
-            proceeds = mark if mark > 0 else 0
+            proceeds, status, extra = _ghost_proceeds(cost, shares, mark)
             exit_px = (proceeds / 100.0 / shares) if shares > 0 else 0.0
             entry["settled_pnl_cents"] = proceeds - cost
-            entry["status"] = "won" if proceeds >= cost else "lost"
+            entry["status"] = status
             tag = "flat" if flat_book else "missing"
-            entry["exit_reason"] = f"ghost_reconcile {tag} age_h={age_h:.0f}"
+            entry["exit_reason"] = f"ghost_reconcile {tag} {extra} age_h={age_h:.0f}"
             entry["exit_price"] = round(exit_px, 4)
             entry["closed_ts"] = now.isoformat()
+            entry["mark_cents"] = proceeds
+            closed.append(dict(entry))
+            dirty = True
+        if dirty:
+            self._save(data)
+        return closed
+
+    def settle_expired_by_match_date(self, *, grace_days: int = 1) -> List[Dict[str, Any]]:
+        """Mark open rows lost (or redeemed) after match_date + grace.
+
+        Used by lottery / stale sports rows that never got on-chain settle.
+        """
+        today = _now_cn().date()
+        data = self._load()
+        closed: List[Dict[str, Any]] = []
+        dirty = False
+        for entry in data.get("entries") or []:
+            if entry.get("status") != "open":
+                continue
+            raw = str(entry.get("match_date") or "").strip()
+            if not raw:
+                continue
+            try:
+                md = date_cls.fromisoformat(raw[:10])
+            except ValueError:
+                continue
+            if md >= today - timedelta(days=max(0, grace_days)):
+                continue
+            cost = int(entry.get("cost_cents") or 0)
+            shares = int(entry.get("shares") or 0)
+            mark = int(entry.get("mark_cents") or 0)
+            proceeds, status, extra = _expired_proceeds(cost, shares, mark)
+            entry["settled_pnl_cents"] = proceeds - cost
+            entry["status"] = status
+            entry["exit_reason"] = f"expired_match {extra} date={md.isoformat()}"
+            entry["exit_price"] = (proceeds / 100.0 / shares) if shares else 0.0
+            entry["closed_ts"] = _now_cn().isoformat()
             entry["mark_cents"] = proceeds
             closed.append(dict(entry))
             dirty = True
@@ -250,7 +316,7 @@ class SportsPnL:
             sh = int(shares or entry.get("shares") or 0)
             proceeds = int(round(exit_price * sh * 100))
             entry["settled_pnl_cents"] = proceeds - cost
-            entry["status"] = "won" if proceeds >= cost else "lost"
+            entry["status"] = "won" if proceeds > cost else ("flat" if proceeds == cost else "lost")
             entry["exit_reason"] = reason
             entry["exit_price"] = round(exit_price, 4)
             entry["closed_ts"] = _now_cn().isoformat()

@@ -155,6 +155,11 @@ class LotterySleeve:
         }
         rejects: Counter = Counter()
 
+        expired = self.pnl.settle_expired_by_match_date(grace_days=1)
+        stats["settled_expired"] = len(expired)
+        if expired:
+            print(f"   Settled {len(expired)} expired lottery tickets", flush=True)
+
         print("\n🎰 LOTTERY SLEEVE — small longshots (entertainment)", flush=True)
         print(
             f"   Band {PRICE_MIN}–{PRICE_MAX} | min ticket ≥${MIN_NOTIONAL:.2f} | "

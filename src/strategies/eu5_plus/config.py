@@ -17,7 +17,7 @@ MAX_ENTRIES_PER_DAY = int(os.getenv("EU5_PLUS_MAX_ENTRIES_PER_DAY", "8"))
 HARD_MAX_USDC = float(os.getenv("EU5_PLUS_HARD_MAX_USDC", "2.0"))
 
 _DEFAULT_STRATS = (
-    "draw_fv,kickoff_lag,completeness,live_draw,line_cross,narrative"
+    "draw_fv,kickoff_lag,completeness,live_draw,line_cross"
 )
 ENABLED_STRATS = tuple(
     s.strip()
@@ -71,6 +71,8 @@ REFERENCE_CACHE = Path("data") / "eu5_plus_reference.json"
 
 STOP_LOSS_PCT = float(os.getenv("EU5_PLUS_STOP_LOSS_PCT", "0.50"))
 EXIT_FAIL_COOLDOWN_S = float(os.getenv("EU5_PLUS_EXIT_FAIL_COOLDOWN_S", "1800"))
+# Ledger opens with no book / no ts older than this are marked lost (zombie settle).
+STALE_OPEN_HOURS = float(os.getenv("EU5_PLUS_STALE_OPEN_HOURS", "72"))
 
 # Event slug prefixes for top-5 (+ UCL as bonus EU5 clubs).
 EU5_SLUG_PREFIXES = (

@@ -26,9 +26,17 @@ COPY_SOCCER_ONLY = (os.getenv("SPORTS_RN1_SOCCER_ONLY", "true").strip().lower()
                     not in ("0", "false", "no", "off"))
 # Allow ATP/WTA singles alongside soccer (ITF/doubles off by default).
 COPY_ALLOW_TENNIS = (
-    os.getenv("SPORTS_RN1_ALLOW_TENNIS", "true").strip().lower()
+    os.getenv("SPORTS_RN1_ALLOW_TENNIS", "false").strip().lower()
     not in ("0", "false", "no", "off")
 )
+# Only copy ``Will X win on DATE`` (skip O/U, 1H, BTTS, draws).
+COPY_MATCH_WINNER_ONLY = (
+    os.getenv("SPORTS_RN1_MATCH_WINNER_ONLY", "true").strip().lower()
+    not in ("0", "false", "no", "off")
+)
+# Skip already-dead books even if inside the nominal band.
+COPY_DEAD_PRICE_LO = float(os.getenv("SPORTS_RN1_DEAD_PRICE_LO", "0.08"))
+COPY_DEAD_PRICE_HI = float(os.getenv("SPORTS_RN1_DEAD_PRICE_HI", "0.92"))
 COPY_TENNIS_INCLUDE_ITF = (
     os.getenv("SPORTS_RN1_TENNIS_INCLUDE_ITF", "false").strip().lower()
     in ("1", "true", "yes", "on")
@@ -65,8 +73,8 @@ COPY_FOLLOW_RN1_EXIT = (
 COPY_PRICE_MIN = float(os.getenv("SPORTS_RN1_COPY_PRICE_MIN", "0.35"))
 COPY_PRICE_MAX = float(os.getenv("SPORTS_RN1_COPY_PRICE_MAX", "0.75"))
 # Tighter band for soccer "Will X win on DATE" (match-winner underperformed).
-COPY_MW_PRICE_MIN = float(os.getenv("SPORTS_RN1_MW_PRICE_MIN", "0.50"))
-COPY_MW_PRICE_MAX = float(os.getenv("SPORTS_RN1_MW_PRICE_MAX", "0.70"))
+COPY_MW_PRICE_MIN = float(os.getenv("SPORTS_RN1_MW_PRICE_MIN", "0.40"))
+COPY_MW_PRICE_MAX = float(os.getenv("SPORTS_RN1_MW_PRICE_MAX", "0.65"))
 
 MAX_SCAN_CYCLES = 2000
 

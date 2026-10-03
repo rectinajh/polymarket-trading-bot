@@ -15,9 +15,12 @@ from src.clients.gamma_client import GammaClient
 from src.strategies.capital_policy import DailyEntryLog
 from src.strategies.sports.config import (
     COPY_ALLOW_TENNIS,
+    COPY_DEAD_PRICE_HI,
+    COPY_DEAD_PRICE_LO,
     COPY_EXIT_FAIL_COOLDOWN_S,
     COPY_FOLLOW_RN1_EXIT,
     COPY_HARD_MAX_USDC,
+    COPY_MATCH_WINNER_ONLY,
     COPY_MAX_USDC,
     COPY_MIN_NOTIONAL,
     COPY_MIN_SHARES,
@@ -135,14 +138,17 @@ class Rn1SportsMaker:
             self.dry_run = dry_run
 
         t0 = time.time()
-        sports_mode = "soccer+tennis" if COPY_ALLOW_TENNIS else "soccer"
+        sports_mode = "will-win-only" if COPY_MATCH_WINNER_ONLY else (
+            "soccer+tennis" if COPY_ALLOW_TENNIS else "soccer"
+        )
         stats: Dict[str, Any] = {
             "mode": "sports_rn1_copy",
             "live": not self.dry_run,
             "copy_max_usdc": COPY_MAX_USDC,
             "sports_mode": sports_mode,
             "allow_tennis": COPY_ALLOW_TENNIS,
-            "price_band": [COPY_PRICE_MIN, COPY_PRICE_MAX],
+            "match_winner_only": COPY_MATCH_WINNER_ONLY,
+            "price_band": [COPY_MW_PRICE_MIN, COPY_MW_PRICE_MAX] if COPY_MATCH_WINNER_ONLY else [COPY_PRICE_MIN, COPY_PRICE_MAX],
             "scanned": 0,
             "copyable_trades": 0,
             "open_copyable_positions": 0,
@@ -209,6 +215,10 @@ class Rn1SportsMaker:
         if ghost_now:
             settled_now = list(settled_now) + list(ghost_now)
             print(f"   Ghost reconcile: closed {len(ghost_now)} stale opens", flush=True)
+        expired_now = self._pnl.settle_expired_by_match_date(grace_days=1)
+        if expired_now:
+            settled_now = list(settled_now) + list(expired_now)
+            print(f"   Expired-match settle: closed {len(expired_now)}", flush=True)
         stats["settled"] = len(settled_now)
         for entry in settled_now:
             notify_sports_settlement(
@@ -487,6 +497,10 @@ class Rn1SportsMaker:
         )
         if not (lo <= price <= hi):
             rejects["price_band"] += 1
+            self._seen.add(dedupe_key)
+            return False, cash, remaining
+        if price <= COPY_DEAD_PRICE_LO or price >= COPY_DEAD_PRICE_HI:
+            rejects["dead_book"] += 1
             self._seen.add(dedupe_key)
             return False, cash, remaining
         if hold_key in our_held:

@@ -105,9 +105,24 @@ def test_is_copyable_soccer_and_tennis():
         "Spread: USC (-27.5)",
         slug="cfb-usc-sjsu-spread",
     )
+    assert is_copyable_market(
+        "Will Arsenal win on 2026-10-03?",
+        match_winner_only=True,
+    )
+    assert not is_copyable_market(
+        "O/U 2.5: Arsenal vs Chelsea",
+        match_winner_only=True,
+    )
+    assert not is_copyable_market(
+        "ATP Cincinnati: A vs B",
+        slug="atp-cin-a-b",
+        allow_tennis=True,
+        match_winner_only=True,
+    )
 
 
 def test_default_price_band():
+    import os
     from src.strategies.sports.config import (
         COPY_MW_PRICE_MAX,
         COPY_MW_PRICE_MIN,
@@ -119,10 +134,9 @@ def test_default_price_band():
 
     assert COPY_PRICE_MIN == 0.35
     assert COPY_PRICE_MAX == 0.75
-    assert COPY_MW_PRICE_MIN == 0.50
-    assert COPY_MW_PRICE_MAX == 0.70
+    assert COPY_MW_PRICE_MIN == float(os.getenv("SPORTS_RN1_MW_PRICE_MIN", "0.40"))
+    assert COPY_MW_PRICE_MAX == float(os.getenv("SPORTS_RN1_MW_PRICE_MAX", "0.65"))
     # Env-overridable (2026-09-19 slow-down set it to 3 in .env).
-    import os
     assert MAX_ENTRIES_PER_DAY == int(os.getenv("SPORTS_RN1_MAX_ENTRIES_PER_DAY", "10"))
     assert SPORTS_GHOST_RECONCILE_HOURS == 12.0
 
@@ -309,3 +323,55 @@ def test_reconcile_flat_book_faster(tmp_path):
     closed = pnl.reconcile_ghost_opens([], max_age_hours=12, flat_age_hours=6)
     assert len(closed) == 1
     assert "flat" in closed[0]["exit_reason"]
+
+
+def test_ghost_mark_eq_cost_is_not_a_win(tmp_path):
+    from datetime import datetime, timedelta
+    from src.strategies.capital_policy import CN_TZ
+    from src.strategies.sports.sports_pnl import SportsPnL
+
+    path = tmp_path / "sports_pnl.json"
+    pnl = SportsPnL(path)
+    old = (datetime.now(CN_TZ) - timedelta(hours=48)).isoformat()
+    pnl._save({
+        "experiment_start": "2026-08-30",
+        "entries": [{
+            "condition_id": "0xeq",
+            "side": "yes",
+            "status": "open",
+            "shares": 5,
+            "cost_cents": 210,
+            "mark_cents": 210,
+            "opened_ts": old,
+            "sport": "rn1_soccer_copy",
+        }],
+    })
+    closed = pnl.reconcile_ghost_opens([], max_age_hours=36, flat_age_hours=36)
+    assert len(closed) == 1
+    assert closed[0]["status"] == "flat"
+    assert closed[0]["settled_pnl_cents"] == 0
+
+
+def test_settle_expired_by_match_date(tmp_path):
+    from src.strategies.sports.sports_pnl import SportsPnL
+
+    path = tmp_path / "lot.json"
+    pnl = SportsPnL(path)
+    pnl._save({
+        "experiment_start": "2026-09-26",
+        "entries": [{
+            "condition_id": "0xlot",
+            "side": "yes",
+            "status": "open",
+            "shares": 51,
+            "cost_cents": 102,
+            "mark_cents": 102,
+            "match_date": "2026-09-20",
+            "opened_ts": "2026-09-20T12:00:00+08:00",
+            "sport": "lottery:will_win",
+        }],
+    })
+    closed = pnl.settle_expired_by_match_date(grace_days=1)
+    assert len(closed) == 1
+    assert closed[0]["status"] == "lost"
+    assert closed[0]["settled_pnl_cents"] == -102

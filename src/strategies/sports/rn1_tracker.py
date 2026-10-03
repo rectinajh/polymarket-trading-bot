@@ -10,6 +10,7 @@ import httpx
 
 from src.strategies.sports.config import (
     COPY_ALLOW_TENNIS,
+    COPY_MATCH_WINNER_ONLY,
     COPY_MAX_USDC,
     COPY_TENNIS_INCLUDE_DOUBLES,
     COPY_TENNIS_INCLUDE_ITF,
@@ -74,6 +75,7 @@ class Rn1Trade:
             allow_tennis=COPY_ALLOW_TENNIS,
             include_itf=COPY_TENNIS_INCLUDE_ITF,
             include_doubles=COPY_TENNIS_INCLUDE_DOUBLES,
+            match_winner_only=COPY_MATCH_WINNER_ONLY,
         )
 
 
@@ -118,6 +120,7 @@ class Rn1Position:
             allow_tennis=COPY_ALLOW_TENNIS,
             include_itf=COPY_TENNIS_INCLUDE_ITF,
             include_doubles=COPY_TENNIS_INCLUDE_DOUBLES,
+            match_winner_only=COPY_MATCH_WINNER_ONLY,
         )
 
     @property

@@ -210,8 +210,11 @@ def is_copyable_market(
     allow_tennis: bool = True,
     include_itf: bool = False,
     include_doubles: bool = False,
+    match_winner_only: bool = False,
 ) -> bool:
-    """Soccer always; tennis when ``allow_tennis`` (default ATP/WTA singles)."""
+    """Soccer (optionally Will-win only); tennis when ``allow_tennis``."""
+    if match_winner_only:
+        return is_soccer_match_winner(title)
     if is_soccer_market(title, slug, event_slug):
         return True
     if allow_tennis and is_tennis_market(

@@ -21,6 +21,7 @@ from src.strategies.eu5_plus.config import (
     ENABLED_STRATS,
     EXIT_FAIL_COOLDOWN_S,
     HARD_MAX_USDC,
+    STALE_OPEN_HOURS,
     MAX_ENTRIES_PER_DAY,
     MAX_PER_MATCH_USDC,
     STOP_LOSS_PCT,
@@ -148,6 +149,8 @@ class Eu5PlusOrchestrator:
 
         marks = await self._enrich_marks(marks)
         sl_exits = await self._manage_stop_losses(marks)
+        stale_n = self._expire_stale_opens(marks)
+        sl_exits += stale_n
 
         context = {
             "live": {},
@@ -388,6 +391,49 @@ class Eu5PlusOrchestrator:
             else:
                 self._exit_fail_until[cid.lower()] = now + EXIT_FAIL_COOLDOWN_S
         return exited
+
+    def _expire_stale_opens(self, marks: Dict[str, float]) -> int:
+        """Close zombie opens (no mark / match already gone) so week PnL is honest."""
+        if STALE_OPEN_HOURS <= 0:
+            return 0
+        now = datetime.now(CN_TZ)
+        closed = 0
+        for pos in list(self.ledger.open_positions()):
+            cid = str(pos.get("condition_id") or "")
+            if not cid:
+                continue
+            mark = float(marks.get(cid.lower()) or 0)
+            if mark >= 0.02:
+                continue  # still a live book — leave to SL / later settle
+            raw_ts = str(pos.get("ts") or pos.get("opened_ts") or "")
+            if raw_ts:
+                try:
+                    dt = datetime.fromisoformat(raw_ts)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=CN_TZ)
+                    age_h = (now - dt.astimezone(CN_TZ)).total_seconds() / 3600.0
+                except ValueError:
+                    age_h = STALE_OPEN_HOURS + 1.0
+            else:
+                age_h = STALE_OPEN_HOURS + 1.0
+            if age_h < STALE_OPEN_HOURS:
+                continue
+            self.ledger.append({
+                "kind": "exit",
+                "condition_id": cid,
+                "strategy": pos.get("strategy"),
+                "shares": int(pos.get("shares") or 0),
+                "entry_price": pos.get("entry_price"),
+                "exit_price": 0.0,
+                "reason": f"expired_stale age_h={age_h:.0f}",
+            })
+            self.ledger.mark_closed(cid, exit_price=0.0, reason=f"expired_stale age_h={age_h:.0f}")
+            closed += 1
+            print(
+                f"   stale expire [{pos.get('strategy')}] {cid[:12]} age={age_h:.0f}h",
+                flush=True,
+            )
+        return closed
 
     async def _exit_one(self, pos: Dict[str, Any], *, mark_price: float, reason: str) -> bool:
         cid = str(pos.get("condition_id") or "")

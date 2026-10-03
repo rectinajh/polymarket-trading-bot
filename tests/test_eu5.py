@@ -114,5 +114,54 @@ class TestReferenceCacheSerde(unittest.TestCase):
         self.assertAlmostEqual(back[0].outcomes["Draw"].fair_prob, 0.30)
 
 
+class TestTeamNameMatch(unittest.TestCase):
+    def test_city_not_stripped_to_manchester(self) -> None:
+        from src.strategies.sports.match import normalize_team
+
+        city = normalize_team("Manchester City FC")
+        united = normalize_team("Manchester United")
+        self.assertEqual(city, "manchester city")
+        self.assertEqual(united, "manchester united")
+        self.assertNotEqual(city, united)
+
+    def test_match_allows_timezone_slack(self) -> None:
+        from datetime import datetime, timezone
+        from src.clients.odds_api_client import ReferenceEvent, ReferenceOutcome
+        from src.strategies.sports.match import match_market_to_reference
+
+        city = "Manchester City"
+        outcomes = {
+            city: ReferenceOutcome(team=city, decimal_odds=1.7, fair_prob=0.55),
+            "Arsenal": ReferenceOutcome(team="Arsenal", decimal_odds=5.0, fair_prob=0.18),
+        }
+        ev = ReferenceEvent(
+            event_id="1",
+            sport_key="soccer_epl",
+            commence_time=datetime(2026, 10, 4, 0, 30, tzinfo=timezone.utc),
+            home_team=city,
+            away_team="Arsenal",
+            outcomes=outcomes,
+        )
+        mkt = MatchWinnerMarket(
+            condition_id="0xabc",
+            question="Will Manchester City win on 2026-10-03?",
+            team="Manchester City FC",
+            match_date=date(2026, 10, 3),
+            yes_price=0.50,
+            no_price=0.50,
+            end_ts=None,
+            volume=10000.0,
+            neg_risk=False,
+            tick_size=0.01,
+            yes_token="y",
+            no_token="n",
+            raw={},
+        )
+        hit = match_market_to_reference(mkt, [ev])
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit.team_name, city)
+        self.assertAlmostEqual(hit.fair_prob, 0.55)
+
+
 if __name__ == "__main__":
     unittest.main()

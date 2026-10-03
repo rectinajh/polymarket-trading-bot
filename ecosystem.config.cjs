@@ -57,7 +57,8 @@ module.exports = {
       script: "/www/polymarket-trading-bot/.venv/bin/python",
       // Entertainment longshots: week $10, ≤5/day, YES≤15¢, min CLOB ticket.
       // Isolated from EU5 fair-value; expect negative EV.
-      args: "cli.py run --lottery --live --loop --interval 300 --log-level INFO",
+      // Scan-only (no --live): lottery EV is negative; keep discovering but do not buy.
+      args: "cli.py run --lottery --loop --interval 300 --log-level INFO",
       interpreter: "none",
       autorestart: true,
       max_restarts: 20,
@@ -77,7 +78,7 @@ module.exports = {
       name: "polymarket-eu5-plus",
       cwd: "/www/polymarket-trading-bot",
       script: "/www/polymarket-trading-bot/.venv/bin/python",
-      // EU5 parallel: draw_fv, kickoff_lag, completeness, live_draw, line_cross, narrative.
+      // EU5 parallel: draw_fv, kickoff_lag, completeness, live_draw, line_cross (narrative OFF).
       // Week $15 · ≤8/day · isolated from EU5 FV + lottery.
       args: "cli.py run --eu5-plus --live --loop --interval 300 --log-level INFO",
       interpreter: "none",
