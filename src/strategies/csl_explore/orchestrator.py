@@ -20,7 +20,9 @@ from src.strategies.csl_explore.config import (
     ENABLED_STRATS,
     EVENT_SLUGS,
     EXIT_FAIL_COOLDOWN_S,
+    FOCUS_TEAMS,
     MAX_PER_MATCH_USDC,
+    STALE_OPEN_HOURS,
     STOP_LOSS_PCT,
     WEEK_BUDGET_USDC,
 )
@@ -33,10 +35,15 @@ from src.strategies.csl_explore.strategies.anti_whale import AntiWhaleStrategy
 from src.strategies.csl_explore.strategies.completeness import CompletenessStrategy
 from src.strategies.csl_explore.strategies.dog_basket import DogBasketStrategy
 from src.strategies.csl_explore.strategies.fingerprint import FingerprintStrategy
+from src.strategies.csl_explore.strategies.focus_club import (
+    FocusClubStrategy,
+    match_involves_focus,
+)
 from src.strategies.csl_explore.strategies.narrative import NarrativeStrategy
 from src.strategies.csl_explore.strategies.time_lag import TimeLagStrategy
 
 STRATEGY_REGISTRY = {
+    FocusClubStrategy.id: FocusClubStrategy,
     FingerprintStrategy.id: FingerprintStrategy,
     TimeLagStrategy.id: TimeLagStrategy,
     CompletenessStrategy.id: CompletenessStrategy,
@@ -44,6 +51,11 @@ STRATEGY_REGISTRY = {
     AntiWhaleStrategy.id: AntiWhaleStrategy,
     DogBasketStrategy.id: DogBasketStrategy,
 }
+
+
+def _week_id() -> str:
+    now = datetime.now(CN_TZ)
+    return f"{now.isocalendar().year}-W{now.isocalendar().week:02d}"
 
 
 def _mark_map(matches: List[MatchBundle]) -> Dict[str, float]:
@@ -77,7 +89,13 @@ class CslExploreOrchestrator:
         self.client = client
         self.gamma = gamma
         self.enabled = tuple(enabled or ENABLED_STRATS)
-        self.slugs = tuple(slugs or EVENT_SLUGS)
+        # None → auto-discover each cycle; explicit tuple (incl. EVENT_SLUGS) pins.
+        if slugs is not None:
+            self.slugs: Optional[Sequence[str]] = tuple(slugs)
+        elif EVENT_SLUGS:
+            self.slugs = EVENT_SLUGS
+        else:
+            self.slugs = None
         self.live_context = live_context or {}
         self.ledger = ledger or ExploreLedger()
         self.scan_log = Path(scan_log)
@@ -90,6 +108,17 @@ class CslExploreOrchestrator:
                 continue
             self._strategies.append(cls())
 
+    def _ensure_week(self) -> float:
+        """Reset spent_usdc on new ISO week (Monday CN), like EU5+."""
+        st = self.ledger.load_state()
+        wid = _week_id()
+        if st.get("week_id") != wid:
+            st["week_id"] = wid
+            st["spent_usdc"] = 0.0
+            self.ledger.save_state(st)
+            print(f"   New week {wid} — budget reset", flush=True)
+        return float(st.get("spent_usdc") or 0.0)
+
     def _filled_keys(self) -> Set[str]:
         st = self.ledger.load_state()
         keys = st.get("filled_keys") or []
@@ -97,6 +126,7 @@ class CslExploreOrchestrator:
 
     def _mark_filled(self, *keys: str, usdc: float) -> None:
         st = self.ledger.load_state()
+        st["week_id"] = _week_id()
         filled = list(st.get("filled_keys") or [])
         for key in keys:
             if key and key not in filled:
@@ -107,19 +137,39 @@ class CslExploreOrchestrator:
 
     async def run(self) -> Dict[str, Any]:
         mode = "DRY-RUN" if self.dry_run else "LIVE"
+        spent = self._ensure_week()
         print(f"🧪 CSL EXPLORE ({mode})", flush=True)
         print(
             f"   Strategies: {', '.join(s.id for s in self._strategies) or '(none)'}",
             flush=True,
         )
+        slug_label = (
+            f"{len(self.slugs)} pinned"
+            if self.slugs is not None
+            else "auto-discover"
+        )
         print(
-            f"   Events: {len(self.slugs)} slugs · week_budget=${WEEK_BUDGET_USDC:.2f} "
-            f"· spent=${self.ledger.week_spent():.2f} · SL={STOP_LOSS_PCT*100:.0f}% (TP manual)",
+            f"   Events: {slug_label} · week_budget=${WEEK_BUDGET_USDC:.2f} "
+            f"· spent=${spent:.2f} · SL={STOP_LOSS_PCT*100:.0f}% (TP manual)",
             flush=True,
         )
 
         matches = await fetch_match_bundles(self.slugs)
         print(f"   Loaded matches: {len(matches)}", flush=True)
+        if FOCUS_TEAMS:
+            focus_matches = [
+                m for m in matches if match_involves_focus(m, FOCUS_TEAMS)
+            ]
+            skipped_n = len(matches) - len(focus_matches)
+            print(
+                f"   Focus clubs: {', '.join(FOCUS_TEAMS[:6])}"
+                f"{'…' if len(FOCUS_TEAMS) > 6 else ''} "
+                f"→ {len(focus_matches)} fixtures (skip {skipped_n})",
+                flush=True,
+            )
+            matches = focus_matches
+        for m in matches:
+            print(f"   • {m.slug} | {m.title}", flush=True)
         marks = _mark_map(matches)
 
         mids: Dict[str, float] = {}
@@ -133,6 +183,8 @@ class CslExploreOrchestrator:
         # Stop-loss pass before new entries (enrich marks for non-CSL opens e.g. UCL).
         marks = await self._enrich_marks_for_opens(marks)
         sl_exits = await self._manage_stop_losses(marks)
+        stale_n = self._expire_stale_opens(marks)
+        sl_exits += stale_n
 
         context = {"live": self.live_context, "ledger": self.ledger}
         all_signals: List[ExploreSignal] = []
@@ -145,7 +197,6 @@ class CslExploreOrchestrator:
             )
             for strat in self._strategies:
                 all_signals.extend(strat.generate(match, context=context))
-
         actionable = [s for s in all_signals if s.action.startswith("buy")]
         filled = self._filled_keys()
         fresh = [
@@ -175,7 +226,7 @@ class CslExploreOrchestrator:
                 live=True,
                 placed=placed,
                 deployed_usdc=deployed,
-                week_spent=self.ledger.week_spent(),
+                week_spent=self._ensure_week(),
                 by_strategy=by_strategy,
             )
         watches = sum(1 for s in all_signals if s.action == "watch")
@@ -193,7 +244,7 @@ class CslExploreOrchestrator:
             "watches": watches,
             "skips": skips,
             "planned_usdc": round(sum(s.usdc for s in planned), 4),
-            "week_spent": self.ledger.week_spent(),
+            "week_spent": self._ensure_week(),
             "open_positions": len(self.ledger.open_positions()),
             "match_summaries": [m.to_summary() for m in matches],
             "planned": [s.to_dict() for s in planned],
@@ -404,9 +455,63 @@ class CslExploreOrchestrator:
             print(f"   SL FAIL: {exc}", flush=True)
             return False
 
+    def _expire_stale_opens(self, marks: Dict[str, float]) -> int:
+        """Close zombie opens (resolved / no book) so budget and PnL stay honest."""
+        if STALE_OPEN_HOURS <= 0:
+            return 0
+        now = datetime.now(CN_TZ)
+        closed = 0
+        for pos in list(self.ledger.open_positions()):
+            cid = str(pos.get("condition_id") or "")
+            if not cid:
+                continue
+            mark = float(marks.get(cid.lower()) or 0)
+            # Live mid still tradeable — leave to stop-loss.
+            if 0.02 < mark < 0.98:
+                continue
+            raw_ts = str(pos.get("ts") or pos.get("opened_ts") or "")
+            if raw_ts:
+                try:
+                    dt = datetime.fromisoformat(raw_ts)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=CN_TZ)
+                    age_h = (now - dt.astimezone(CN_TZ)).total_seconds() / 3600.0
+                except ValueError:
+                    age_h = STALE_OPEN_HOURS + 1.0
+            else:
+                # Legacy opens without ts — treat as stale immediately.
+                age_h = STALE_OPEN_HOURS + 1.0
+            # Resolved (0/1) can close immediately; missing mark needs age.
+            resolved = mark <= 0.02 or mark >= 0.98
+            if not resolved and age_h < STALE_OPEN_HOURS:
+                continue
+            if resolved and age_h < 1.0 and raw_ts:
+                # brand-new fill briefly at extreme — wait a bit
+                continue
+            exit_px = mark if mark >= 0.98 else 0.0
+            reason = f"expired_stale age_h={age_h:.0f} mark={mark:.3f}"
+            self.ledger.append({
+                "kind": "exit",
+                "condition_id": cid,
+                "strategy": pos.get("strategy"),
+                "shares": int(pos.get("shares") or 0),
+                "entry_price": pos.get("entry_price"),
+                "exit_price": exit_px,
+                "reason": reason,
+                "match_title": pos.get("match_title") or "",
+            })
+            self.ledger.mark_closed(cid, exit_price=exit_px, reason=reason)
+            closed += 1
+            print(
+                f"   stale expire [{pos.get('strategy')}] {cid[:12]} "
+                f"mark={mark:.3f} age={age_h:.0f}h",
+                flush=True,
+            )
+        return closed
+
     def _allocate(self, signals: List[ExploreSignal]) -> List[ExploreSignal]:
         """Priority + week budget + per-match cap (live)."""
-        remaining = WEEK_BUDGET_USDC - self.ledger.week_spent()
+        remaining = WEEK_BUDGET_USDC - self._ensure_week()
         if remaining <= 0:
             print("   Week budget exhausted — no new orders.", flush=True)
             return []

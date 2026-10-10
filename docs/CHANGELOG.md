@@ -7,6 +7,26 @@ PnL 数字仍记在 [NET_PNL.md](NET_PNL.md)。**阶段计划与决策门**见 [
 
 ---
 
+## 2026-10-10 — CSL：焦点队（蓉城/铁人/铜梁龙）+ focus_club
+
+**目的：** 不再全联赛 narrative 乱买；只做成都蓉城、辽宁铁人、重庆铜梁龙场次。
+
+- 新策略 `focus_club`：买焦点队 **胜** YES（价带 0.22–0.72）
+- 默认启用：`focus_club,fingerprint,completeness,time_lag,anti_whale`（关 narrative）
+- `CSL_EXPLORE_FOCUS_TEAMS` 过滤场次；周预算默认 $12.12、单场 $2.02
+
+---
+
+## 2026-10-10 — CSL：自动发现本周场次 + 周预算重置
+
+**目的：** 中超不下注——仍钉着 9 月初硬编码 slug，且 `spent=$16 > budget=$8` 永久卡死。
+
+- `discover.py`：Gamma 搜索 `chi-*-YYYY-MM-DD` 自动发现未来 7 天场次（可 env 钉死）
+- 编排器：ISO 周重置 `spent_usdc`；无盘/已结算僵尸仓自动了结
+- 跳过 `closed` 事件
+
+---
+
 ## 2026-10-03 — 盈利口径：停彩票 live、关 narrative、修账本与对盘
 
 **目的：** 上周持续亏损（彩票负 EV、叙事买热门、RN1 杂盘/死盘、ghost 假赢、EU5 队名对不上）。按可盈利约束收紧。

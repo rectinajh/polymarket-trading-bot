@@ -17,6 +17,7 @@ STATE_PATH = Path("data") / "csl_explore_discord_state.json"
 
 # Clear labels so Discord is not confused with RN1 sports copy.
 STRATEGY_LABELS: Dict[str, str] = {
+    "focus_club": "焦点队胜 focus_club",
     "fingerprint": "比分指纹 fingerprint",
     "time_lag": "时间错位 time_lag",
     "completeness": "完备缺口 completeness",

@@ -1122,8 +1122,12 @@ def render_strategy_params() -> None:
         st.dataframe(
             _param_rows([
                 ("启用策略", ", ".join(csl.ENABLED_STRATS),
-                 "fingerprint/time_lag/completeness/narrative/anti_whale",
+                 "focus_club/fingerprint/completeness/…（narrative 已关）",
                  "CSL_EXPLORE_ENABLED_STRATS"),
+                ("FOCUS_TEAMS", ", ".join(csl.FOCUS_TEAMS[:6]) + ("…" if len(csl.FOCUS_TEAMS) > 6 else ""),
+                 "只交易这些队的场次；主买该队胜", "CSL_EXPLORE_FOCUS_TEAMS"),
+                ("FOCUS 价带", f"{csl.FOCUS_CLUB_PRICE_MIN} – {csl.FOCUS_CLUB_PRICE_MAX}",
+                 "焦点队胜价带", "CSL_EXPLORE_FOCUS_PRICE_MIN/MAX"),
                 ("ORDER_USDC", csl.ORDER_USDC, "单笔名义（$）", "CSL_EXPLORE_ORDER_USDC"),
                 ("MIN_SHARES", csl.MIN_SHARES, "CLOB 最小份数", "CSL_EXPLORE_MIN_SHARES"),
                 ("WEEK_BUDGET_USDC", csl.WEEK_BUDGET_USDC, "每周预算（$）",

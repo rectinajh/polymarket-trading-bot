@@ -148,3 +148,54 @@ def test_bootstrap_opens_from_fills(tmp_path):
     assert opens[0]["entry_price"] == 0.50
     led.mark_closed("0xabc", exit_price=0.40, reason="stop_loss")
     assert led.open_positions() == []
+
+
+def test_chi_match_slug_regex():
+    from src.strategies.csl_explore.discover import _CHI_MATCH_SLUG_RE
+
+    assert _CHI_MATCH_SLUG_RE.match("chi-ron-jin-2026-10-10")
+    assert not _CHI_MATCH_SLUG_RE.match("chi-ron-jin-2026-10-10-total-corners")
+    assert not _CHI_MATCH_SLUG_RE.match("2026-soccer-chinese-super-league-winner")
+
+
+def test_focus_club_buys_rongcheng_win():
+    from src.strategies.csl_explore.strategies.focus_club import FocusClubStrategy
+
+    m = _match(
+        slug="chi-ron-jin-2026-10-10",
+        title="Chengdu Rongcheng FC vs. Tianjin Jinmen Hu FC",
+        home_win=_mkt("h", "Will Chengdu Rongcheng FC win on 2026-10-10?", 0.55),
+        away_win=_mkt("a", "Will Tianjin Jinmen Hu FC win on 2026-10-10?", 0.22),
+    )
+    sigs = FocusClubStrategy().generate(m, context={})
+    assert len(sigs) == 1
+    assert sigs[0].action == "buy_yes"
+    assert sigs[0].condition_id == "h"
+    assert "rongcheng" in sigs[0].reason or "ron" in sigs[0].reason
+
+
+def test_focus_club_skips_non_focus():
+    from src.strategies.csl_explore.strategies.focus_club import (
+        FocusClubStrategy,
+        match_involves_focus,
+    )
+
+    m = _match(
+        slug="chi-sgr-yun-2026-10-10",
+        title="Shanghai Shenhua FC vs. Yunnan Yukun FC",
+    )
+    assert match_involves_focus(m) == []
+    sigs = FocusClubStrategy().generate(m, context={})
+    assert sigs[0].action == "skip"
+
+
+def test_week_budget_resets_on_new_iso_week(tmp_path):
+    from src.strategies.csl_explore.ledger import ExploreLedger
+    from src.strategies.csl_explore.orchestrator import CslExploreOrchestrator, _week_id
+
+    led = ExploreLedger(tmp_path / "led.jsonl", tmp_path / "st.json")
+    led.save_state({"week_id": "2020-W01", "spent_usdc": 16.05, "opens": [], "filled_keys": []})
+    orch = CslExploreOrchestrator(dry_run=True, ledger=led, slugs=())
+    spent = orch._ensure_week()
+    assert spent == 0.0
+    assert led.load_state()["week_id"] == _week_id()
